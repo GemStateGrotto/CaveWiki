@@ -31,6 +31,14 @@ Deployment configuration lives in the secrets file (`~/.secrets/cavewiki`) mount
 - Don't document things the reader can infer from the code or a directory listing.
 - Don't duplicate content across README.md, IMPLEMENTATION.md, and TODO.md — cross-reference instead.
 
+## Commit Messages
+
+Keep concise: note what changed and why. Don't list design decisions or key features — that content already lives in the committed files. Explain the change but don't restate the code. A good commit message is a one- or two-line summary, not a mini design doc.
+
+## Agent Learning
+
+When you learn something project-specific that would typically go into agent memory, add it to this file instead so other contributors and agents benefit too.
+
 ## Actions Requiring Explicit Approval
 
 Never perform these actions unless the user directly requests or approves them:
