@@ -6,45 +6,48 @@ Checklist for building out the PoC infrastructure. Each phase depends on the pre
 
 ## Phase 1: Project Scaffolding
 
-- [ ] Initialize CDK TypeScript project in `cdk/` (`cdk init app --language typescript`)
-- [ ] Create `docker/mediawiki/` directory
-- [ ] Create `scripts/` directory
-- [ ] Define CDK context keys in `cdk/cdk.json`:
+- [x] Initialize CDK TypeScript project in `cdk/` (`cdk init app --language typescript`)
+- [x] Create `docker/mediawiki/` directory
+- [x] Create `scripts/` directory
+- [x] Define CDK context keys in `cdk/cdk.json`:
   - `domainName` — public wiki URL hostname
   - `hostedZoneId` — Route 53 hosted zone ID
   - `hostedZoneName` — Route 53 hosted zone domain name
   - `certificateArn` — ACM certificate ARN (must be in us-east-1 for CloudFront)
   - `originRecordName` — subdomain for Fargate origin AAAA record (default: `origin`)
-- [ ] Create `cdk/lib/config.ts` — reads CDK context values, validates required ones, provides defaults
-- [ ] Create `scripts/deploy.sh` — maps environment variables (already present in shell) to `--context` flags, runs `cdk deploy --all`
+- [x] Create `cdk/lib/config.ts` — reads CDK context values, validates required ones, provides defaults
+- [x] Create `scripts/deploy.sh` — maps environment variables (already present in shell) to `--context` flags, runs `cdk deploy --all`
 
 ### Phase 1 Success Criteria
 
-- [ ] `cd cdk && npx tsc --noEmit` compiles with zero errors
-- [ ] `cd cdk && npx cdk synth` produces a CloudFormation template (even if nearly empty) without errors
-- [ ] `cdk/lib/config.ts` throws a clear error when a required context key is missing (test by running `npx cdk synth` without context values)
-- [ ] `scripts/deploy.sh` is executable and exits with a clear error message when required env vars are unset
-- [ ] Directory structure matches the repository layout in README.md
+- [x] `cd cdk && npx tsc --noEmit` compiles with zero errors
+- [x] `cd cdk && npx cdk synth` produces a CloudFormation template (even if nearly empty) without errors
+- [x] `cdk/lib/config.ts` throws a clear error when a required context key is missing (test by running `npx cdk synth` without context values)
+- [x] `scripts/deploy.sh` is executable and exits with a clear error message when required env vars are unset
+- [x] Directory structure matches the repository layout in README.md
 
 ---
 
 ## Phase 2: Network Stack — `cdk/lib/network-stack.ts`
 
-- [ ] VPC with 2 AZs, public subnets only, no NAT gateway
-- [ ] Enable dual-stack: Amazon-provided IPv6 CIDR on VPC + IPv6 CIDR on each subnet
-- [ ] Route table: `::/0` → Internet Gateway (IPv6 egress)
-- [ ] Security Groups:
-  - [ ] **Fargate SG**: inbound TCP 80 from `::/0` (IPv6 — CloudFront connects over IPv6; custom origin header validates requests)
-  - [ ] **Aurora SG**: inbound TCP 3306 from Fargate SG only
-  - [ ] **EFS SG**: inbound TCP 2049 from Fargate SG only
-- [ ] Export VPC and all three security groups as stack outputs
+- [x] VPC with 2 AZs, public subnets only, no NAT gateway
+- [x] Enable dual-stack: Amazon-provided IPv6 CIDR on VPC + IPv6 CIDR on each subnet
+- [x] Route table: `::/0` → Internet Gateway (IPv6 egress)
+- [x] Security Groups:
+  - [x] **Fargate SG**: inbound TCP 80 from `::/0` (IPv6 — CloudFront connects over IPv6; custom origin header validates requests)
+  - [x] **Aurora SG**: inbound TCP 3306 from Fargate SG only
+  - [x] **EFS SG**: inbound TCP 2049 from Fargate SG only
+- [x] Export VPC and all three security groups as stack outputs
+- [ ] Add IPv6-only public subnets (one per AZ) for Fargate — no IPv4 CIDR, IPv6 only
+- [ ] Route table for IPv6-only subnets: `::/0` → Internet Gateway
+- [ ] Export IPv6-only subnets separately for use by Compute stack
 
 ### Phase 2 Success Criteria
 
 - [ ] `npx cdk synth CaveWikiNetwork` produces valid CloudFormation with no errors
-- [ ] Template contains exactly one VPC (with IPv6 CIDR), two public subnets (one per AZ, dual-stack), three security groups
-- [ ] No NAT Gateway or NAT Instance resources appear in the synthesized template
-- [ ] Security group ingress rules match spec: Fargate SG allows 80/tcp from `::/0`; Aurora SG allows 3306/tcp from Fargate SG; EFS SG allows 2049/tcp from Fargate SG
+- [ ] Template contains exactly one VPC (with IPv6 CIDR), four public subnets (two dual-stack for Aurora/EFS, two IPv6-only for Fargate), three security groups
+- [x] No NAT Gateway or NAT Instance resources appear in the synthesized template
+- [x] Security group ingress rules match spec: Fargate SG allows 80/tcp from `::/0`; Aurora SG allows 3306/tcp from Fargate SG; EFS SG allows 2049/tcp from Fargate SG
 - [ ] `npx cdk deploy CaveWikiNetwork` succeeds and resources are visible in AWS Console
 
 ---
@@ -55,39 +58,39 @@ Depends on: NetworkStack
 
 ### Aurora Serverless v2
 
-- [ ] Engine: Aurora MySQL 8.0 compatible
-- [ ] Single writer instance (no reader)
-- [ ] Min capacity: 0 ACU (scale-to-zero / auto-pause enabled)
-- [ ] Max capacity: 1 ACU
-- [ ] Placed in public subnets, NOT publicly accessible (SG-restricted to Fargate SG)
-- [ ] Master credentials: CDK-generated, auto-stored in Secrets Manager (free for RDS-managed)
-- [ ] Removal policy: RETAIN
+- [x] Engine: Aurora MySQL 8.0 compatible
+- [x] Single writer instance (no reader)
+- [x] Min capacity: 0 ACU (scale-to-zero / auto-pause enabled)
+- [x] Max capacity: 1 ACU
+- [x] Placed in public subnets, NOT publicly accessible (SG-restricted to Fargate SG)
+- [x] Master credentials: CDK-generated, auto-stored in Secrets Manager (free for RDS-managed)
+- [x] Removal policy: RETAIN
 
 ### EFS
 
-- [ ] Encrypted at rest
-- [ ] Performance mode: General Purpose
-- [ ] Throughput mode: Elastic (pay-per-use)
-- [ ] Mount targets in each public subnet
-- [ ] Access point: UID/GID 33 (www-data), root directory path `/mediawiki-images`
-- [ ] Removal policy: RETAIN
+- [x] Encrypted at rest
+- [x] Performance mode: General Purpose
+- [x] Throughput mode: Elastic (pay-per-use)
+- [x] Mount targets in each public subnet
+- [x] Access point: UID/GID 33 (www-data), root directory path `/mediawiki-images`
+- [x] Removal policy: RETAIN
 
 ### Exports
 
-- [ ] Aurora cluster endpoint + port
-- [ ] Secrets Manager secret ARN (for DB credentials)
-- [ ] EFS file system ID + access point ID
+- [x] Aurora cluster endpoint + port
+- [x] Secrets Manager secret ARN (for DB credentials)
+- [x] EFS file system ID + access point ID
 
 ### Phase 3 Success Criteria
 
-- [ ] `npx cdk synth CaveWikiStorage` produces valid CloudFormation with no errors
-- [ ] Template contains Aurora cluster with ServerlessV2ScalingConfiguration (min 0, max 1)
-- [ ] Template contains EFS file system with Encrypted=true and an access point with PosixUser UID/GID 33
-- [ ] Aurora and EFS resources have DeletionPolicy=Retain in the synthesized template
-- [ ] `npx cdk deploy CaveWikiStorage` succeeds
-- [ ] Aurora cluster visible in RDS console with status "Available" or "Paused" (auto-pause)
-- [ ] Secrets Manager contains the auto-generated DB credentials secret
-- [ ] EFS file system visible in EFS console with mount targets in both AZs
+- [x] `npx cdk synth CaveWikiStorage` produces valid CloudFormation with no errors
+- [x] Template contains Aurora cluster with ServerlessV2ScalingConfiguration (min 0, max 1)
+- [x] Template contains EFS file system with Encrypted=true and an access point with PosixUser UID/GID 33
+- [x] Aurora and EFS resources have DeletionPolicy=Retain in the synthesized template
+- [x] `npx cdk deploy CaveWikiStorage` succeeds
+- [x] Aurora cluster visible in RDS console with status "Available" or "Paused" (auto-pause)
+- [x] Secrets Manager contains the auto-generated DB credentials secret
+- [x] EFS file system visible in EFS console with mount targets in both AZs
 
 ---
 
@@ -95,69 +98,69 @@ Depends on: NetworkStack
 
 ### Dockerfile
 
-- [ ] Base image: `mediawiki:1.41-apache`
-- [ ] Install `curl` for health checks (if not already in base)
-- [ ] Copy `composer.local.json` into the MediaWiki directory
-- [ ] Run `composer update --no-dev` to install Semantic MediaWiki
-- [ ] Verify Composer exits 0 and all SMW dependencies resolve without conflicts
-- [ ] Copy `LocalSettings.php` into place
-- [ ] Copy `origin-verify.conf` Apache config into `/etc/apache2/conf-enabled/`
-- [ ] Copy `jobrunner.sh` and make it executable
+- [x] Base image: `mediawiki:1.45`
+- [x] Install `curl` for health checks (if not already in base)
+- [x] Copy `composer.local.json` into the MediaWiki directory
+- [x] Run `composer update --no-dev` to install Semantic MediaWiki
+- [x] Verify Composer exits 0 and all SMW dependencies resolve without conflicts
+- [x] Copy `LocalSettings.php` into place
+- [x] Copy `origin-verify.conf` Apache config into `/etc/apache2/conf-enabled/`
+- [x] Copy `jobrunner.sh` and make it executable
 
 ### composer.local.json
 
-- [ ] Require `mediawiki/semantic-media-wiki: ~4.x`
+- [x] Require `mediawiki/semantic-media-wiki: ~6.0`
 
 ### LocalSettings.php
 
 All configuration via `getenv()` — no hardcoded values.
 
-- [ ] Database config:
+- [x] Database config:
   - `$wgDBserver = getenv('MW_DB_HOST')`
   - `$wgDBname = getenv('MW_DB_NAME') ?: 'cavewiki'`
   - `$wgDBpassword = getenv('MW_DB_PASSWORD')`
   - `$wgDBuser = 'admin'` (Aurora default master user)
   - `$wgDBtype = 'mysql'`
-- [ ] Aurora scale-to-zero compatibility:
+- [x] Aurora scale-to-zero compatibility:
   - `$wgDBservers` array with `'connectTimeout' => 60` (handles 25-30s cold start resume)
-- [ ] Site config:
+- [x] Site config:
   - `$wgServer = getenv('MW_SERVER')` (full URL, e.g., `https://wiki.example.org`)
   - `$wgSitename = getenv('MW_SITENAME') ?: 'CaveWiki'`
   - `$wgScriptPath = ''`
-- [ ] Security keys:
+- [x] Security keys:
   - `$wgSecretKey = getenv('MW_SECRET_KEY')`
   - `$wgUpgradeKey = getenv('MW_UPGRADE_KEY')`
-- [ ] Private wiki (all three set to `false` for the `'*'` group):
+- [x] Private wiki (all three set to `false` for the `'*'` group):
   - `$wgGroupPermissions['*']['read'] = false`
   - `$wgGroupPermissions['*']['edit'] = false`
   - `$wgGroupPermissions['*']['createaccount'] = false`
-- [ ] File uploads enabled, path = `/var/www/html/images` (EFS mount point)
-- [ ] Semantic MediaWiki: `enableSemantics( getenv('MW_SITENAME') ?: 'CaveWiki' )`
+- [x] File uploads enabled, path = `/var/www/html/images` (EFS mount point)
+- [x] Semantic MediaWiki: `enableSemantics( getenv('MW_SITENAME') ?: 'CaveWiki' )`
 
 ### origin-verify.conf (Apache config)
 
 Rejects requests that don't carry the custom origin header. This ensures only the CloudFront distribution can reach the origin.
 
-- [ ] Read expected secret from `MW_ORIGIN_VERIFY` environment variable
-- [ ] Return 403 for any request where the `X-Origin-Verify` header is missing or doesn't match
-- [ ] Use Apache `<If>` directive (mod_headers + mod_expr)
+- [x] Read expected secret from `MW_ORIGIN_VERIFY` environment variable
+- [x] Return 403 for any request where the `X-Origin-Verify` header is missing or doesn't match
+- [x] Use Apache `<If>` directive (mod_headers + mod_expr)
 
 ### jobrunner.sh
 
-- [ ] Bash script that loops:
+- [x] Bash script that loops:
   1. Run `php maintenance/runJobs.php --wait --maxjobs=10`
   2. Sleep 5 seconds on empty queue
   3. Repeat indefinitely
 
 ### Phase 4 Success Criteria
 
-- [ ] `docker build docker/mediawiki/` completes successfully with no errors
-- [ ] Resulting image contains Semantic MediaWiki (`docker run --rm <image> php -r "require '/var/www/html/extensions/SemanticMediaWiki/SemanticMediaWiki.php';"` exits 0)
-- [ ] `docker run --rm <image> composer --working-dir=/var/www/html show mediawiki/semantic-media-wiki` prints the installed version without errors
-- [ ] `docker run --rm <image> test -f /var/www/html/extensions/SemanticMediaWiki/SemanticMediaWiki.php` confirms extension files are in place
-- [ ] `LocalSettings.php` contains no hardcoded domain names, passwords, or environment-specific values
-- [ ] `jobrunner.sh` is executable in the built image
-- [ ] Image can start without crashing when env vars are provided (even if DB is unreachable — Apache should come up)
+- [x] `docker build docker/mediawiki/` completes successfully with no errors
+- [x] Resulting image contains Semantic MediaWiki (`docker run --rm <image> composer --working-dir=/var/www/html show mediawiki/semantic-media-wiki` prints version)
+- [x] `docker run --rm <image> composer --working-dir=/var/www/html show mediawiki/semantic-media-wiki` prints the installed version without errors
+- [x] `docker run --rm <image> test -f /var/www/html/extensions/SemanticMediaWiki/extension.json` confirms extension files are in place
+- [x] `LocalSettings.php` contains no hardcoded domain names, passwords, or environment-specific values
+- [x] `jobrunner.sh` is executable in the built image
+- [x] Image can start without crashing when env vars are provided (even if DB is unreachable — Apache should come up)
 
 ---
 
@@ -167,99 +170,93 @@ Depends on: NetworkStack, StorageStack. Requires Phase 4 Docker image files to e
 
 ### ECS Cluster & Task Definition
 
-- [ ] ECS Cluster (Fargate-only, no EC2 capacity providers)
-- [ ] Task Definition: 0.5 vCPU / 1024 MB
-- [ ] EFS volume definition referencing the EFS access point from StorageStack
+- [x] ECS Cluster (Fargate-only, no EC2 capacity providers)
+- [x] Task Definition: 0.5 vCPU / 1024 MB
+- [x] EFS volume definition referencing the EFS access point from StorageStack
 
 #### Main container (`mediawiki`)
 
-- [ ] Image: `DockerImageAsset` from `docker/mediawiki/` (auto builds + pushes to CDK-managed ECR)
-- [ ] Port mapping: 80
-- [ ] Environment variables:
+- [x] Image: `DockerImageAsset` from `docker/mediawiki/` (auto builds + pushes to CDK-managed ECR)
+- [x] Port mapping: 80
+- [x] Environment variables:
   - `MW_DB_HOST` — Aurora cluster endpoint
   - `MW_DB_NAME` — database name (default: `cavewiki`)
   - `MW_SERVER` — full public URL, constructed from `domainName` CDK context (e.g., `https://{domainName}`)
   - `MW_SITENAME` — wiki name (default: `CaveWiki`)
-- [ ] Secrets (injected from Secrets Manager / SSM):
+- [x] Secrets (injected from Secrets Manager / SSM):
   - `MW_DB_PASSWORD` — from Aurora Secrets Manager secret (password field)
   - `MW_SECRET_KEY` — from SSM `/cavewiki/mediawiki-secret-key`
   - `MW_UPGRADE_KEY` — from SSM `/cavewiki/mediawiki-upgrade-key`
   - `MW_ORIGIN_VERIFY` — from SSM `/cavewiki/origin-verify-secret`
-- [ ] EFS volume mount at `/var/www/html/images`
-- [ ] Essential: true
-- [ ] Health check: `curl -f http://localhost/api.php`
+- [x] EFS volume mount at `/var/www/html/images`
+- [x] Essential: true
+- [x] Health check: `curl -f http://localhost/api.php`
 
 #### Sidecar container (`jobrunner`)
 
-- [ ] Same image as main container
-- [ ] Override command: execute `jobrunner.sh`
-- [ ] Same environment variables and secrets as main container
-- [ ] Same EFS volume mount
-- [ ] Essential: false (web container survives if jobrunner crashes)
-- [ ] No port mappings
+- [x] Same image as main container
+- [x] Override command: execute `jobrunner.sh`
+- [x] Same environment variables and secrets as main container
+- [x] Same EFS volume mount
+- [x] Essential: false (web container survives if jobrunner crashes)
+- [x] No port mappings
 
 ### ECS Service
 
-- [ ] Desired count: 1
-- [ ] Assign public IP: false (no public IPv4 — IPv6 used for public access; saves ~$3.60/mo)
-- [ ] Subnets: public (dual-stack)
-- [ ] Security group: Fargate SG from NetworkStack
-- [ ] Enable Execute Command: true (for `ecs execute-command` to run install.php, update.php, etc.)
+- [x] Desired count: 1
+- [ ] Assign public IP: false (IPv6-only — no IPv4 address assigned)
+- [ ] Subnets: IPv6-only public subnets from NetworkStack
+- [x] Security group: Fargate SG from NetworkStack
+- [ ] Enable ECS `dualStackIPv6` account setting for the account/region (`aws ecs put-account-setting --name dualStackIPv6 --value enabled`)
 
 ### Lambda DNS Updater — `cdk/lambda/dns-updater/index.ts`
 
-- [ ] Runtime: Node.js 20
-- [ ] Triggered by: EventBridge rule on ECS task state change (state=RUNNING, cluster=this cluster)
-- [ ] Logic:
+- [x] Runtime: Node.js 20
+- [x] Triggered by: EventBridge rule on ECS task state change (state=RUNNING, cluster=this cluster)
+- [x] Logic:
   1. Extract task ARN and cluster ARN from the EventBridge event
   2. Call `ecs:DescribeTasks` to get the ENI attachment
   3. Call `ec2:DescribeNetworkInterfaces` to get the IPv6 address — retry up to 3 times with 5s backoff if not yet assigned
   4. Call `route53:ChangeResourceRecordSets` to UPSERT an AAAA record
-- [ ] AAAA record config: `{originRecordName}.{hostedZoneName}`, TTL 60 seconds
-- [ ] IAM permissions (least-privilege):
+- [x] AAAA record config: `{originRecordName}.{hostedZoneName}`, TTL 60 seconds
+- [x] IAM permissions (least-privilege):
   - `ecs:DescribeTasks` (scoped to cluster)
   - `ec2:DescribeNetworkInterfaces`
   - `route53:ChangeResourceRecordSets` (scoped to hosted zone)
-- [ ] Environment variables: `HOSTED_ZONE_ID`, `ORIGIN_RECORD_NAME`, `HOSTED_ZONE_NAME`
+- [x] Environment variables: `HOSTED_ZONE_ID`, `ORIGIN_RECORD_NAME`, `HOSTED_ZONE_NAME`
 
 ### CloudFront Distribution
 
-- [ ] Origin domain: `{originRecordName}.{hostedZoneName}` (the Route 53 AAAA record Lambda updates)
-- [ ] Origin protocol policy: HTTP only (TLS terminates at CloudFront)
-- [ ] Custom origin header: `X-Origin-Verify: <secret>` — value read from SSM `/cavewiki/origin-verify-secret`
-- [ ] Cache policy: `CachePolicy.CACHING_DISABLED`
-- [ ] Origin request policy: `OriginRequestPolicy.ALL_VIEWER` (forward all headers, cookies, query strings)
-- [ ] Viewer protocol policy: Redirect HTTP → HTTPS
-- [ ] Alternate domain names: `[domainName]` from CDK context
-- [ ] Viewer certificate: ACM cert imported from ARN in CDK context (must be us-east-1)
+- [x] Origin domain: `{originRecordName}.{hostedZoneName}` (the Route 53 AAAA record Lambda updates)
+- [x] Origin protocol policy: HTTP only (TLS terminates at CloudFront)
+- [x] Custom origin header: `X-Origin-Verify: <secret>` — value read from SSM `/cavewiki/origin-verify-secret`
+- [x] Cache policy: `CachePolicy.CACHING_DISABLED`
+- [x] Origin request policy: `OriginRequestPolicy.ALL_VIEWER` (forward all headers, cookies, query strings)
+- [x] Viewer protocol policy: Redirect HTTP → HTTPS
+- [x] Alternate domain names: `[domainName]` from CDK context
+- [x] Viewer certificate: ACM cert imported from ARN in CDK context (must be us-east-1)
 
 ### Route 53 Records
 
-- [ ] Alias A + AAAA records: `domainName` → CloudFront distribution domain name
-- [ ] (The origin AAAA record is managed by the Lambda, not by CDK — CDK should not create it to avoid conflicts)
+- [x] Alias A + AAAA records: `domainName` → CloudFront distribution domain name
+- [x] (The origin AAAA record is managed by the Lambda, not by CDK — CDK should not create it to avoid conflicts)
 
 ### Origin Chain Validation (gate — must pass before Phase 7)
 
 After deploying the Compute stack, validate the full origin chain end-to-end before proceeding. This is the highest-risk piece of the architecture and should be proven early.
 
-All tests below run from the devcontainer over IPv4 unless noted. DNS and CloudFront tests work without local IPv6 because CloudFront is dual-stack and DNS lookups for AAAA records travel over IPv4.
+All tests below run from the devcontainer over IPv4 unless noted. DNS and CloudFront tests work without local IPv6 because CloudFront is dual-stack and DNS lookups for AAAA records travel over IPv4. Direct origin tests require IPv6 (use AWS CloudShell).
 
 - [ ] Fargate task reaches RUNNING state (`aws ecs list-tasks` returns a task ARN)
 - [ ] Lambda DNS updater fires (check CloudWatch Logs for the Lambda function)
 - [ ] Route 53 origin AAAA record is populated: `dig AAAA {originRecordName}.{hostedZoneName}` returns the Fargate task's IPv6 address
-- [ ] Origin header validation via ECS Exec (localhost, no IPv6 needed):
-  - `curl -I http://localhost/api.php` without header → 403
-  - `curl -I -H 'X-Origin-Verify: <secret>' http://localhost/api.php` → 200/302
+- [ ] Origin header validation via CloudShell (which has IPv6):
+  - `curl -6 -I http://{originRecordName}.{hostedZoneName}` without header → 403
+  - `curl -6 -I -H 'X-Origin-Verify: <secret>' http://{originRecordName}.{hostedZoneName}` → 200/302
 - [ ] CloudFront chain responds: `curl -I https://{domainName}` returns a response via CloudFront (check `X-Cache` or `Server` header). This proves CloudFront → IPv6 origin → Apache is working end-to-end.
 - [ ] Force a new deployment (task restart) and confirm the Lambda updates the AAAA record to the new IPv6 within ~60s
 
-**If CloudFront fails** and you need to isolate whether it's DNS, IPv6 routing, or Apache: use AWS CloudShell (which has IPv6) to test directly:
-
-```bash
-# From CloudShell:
-curl -6 -I http://{originRecordName}.{hostedZoneName}               # expect 403 (no header)
-curl -6 -I -H 'X-Origin-Verify: <secret>' http://{originRecordName}.{hostedZoneName}  # expect 200/302
-```
+**If CloudFront fails** and you need to isolate whether it's DNS, IPv6 routing, or Apache: test each layer independently from CloudShell — check DNS resolution, direct IPv6 HTTP, and then CloudFront separately.
 
 ### Phase 5 Success Criteria
 
@@ -277,31 +274,31 @@ curl -6 -I -H 'X-Origin-Verify: <secret>' http://{originRecordName}.{hostedZoneN
 
 ### scripts/setup-secrets.sh
 
-- [ ] Creates SSM Parameter Store SecureString parameters (idempotent — skips if already exist):
+- [x] Creates SSM Parameter Store SecureString parameters (idempotent — skips if already exist):
   - `/cavewiki/mediawiki-secret-key` — 64-character random hex string
   - `/cavewiki/mediawiki-upgrade-key` — 16-character random hex string
   - `/cavewiki/origin-verify-secret` — 32-character random hex string (shared between CloudFront and Apache)
-- [ ] Uses `aws ssm put-parameter --type SecureString --no-overwrite`
-- [ ] Region: reads from `AWS_DEFAULT_REGION` or defaults to `us-west-2`
+- [x] Uses `aws ssm put-parameter --type SecureString --no-overwrite`
+- [x] Region: reads from `AWS_DEFAULT_REGION` or defaults to `us-west-2`
 
 ### scripts/deploy.sh
 
 Environment variables are already available in the shell (sourced automatically by the devcontainer from the mounted secrets file — see `.devcontainer/on_create.sh`). The deploy script does **not** need to re-source them.
 
-- [ ] Validates required environment variables:
+- [x] Validates required environment variables:
   - `CAVEWIKI_DOMAIN`
   - `CAVEWIKI_HOSTED_ZONE_ID`
   - `CAVEWIKI_HOSTED_ZONE_NAME`
   - `CAVEWIKI_CERTIFICATE_ARN`
-- [ ] Maps env vars to CDK `--context` flags
-- [ ] Runs `cd cdk && npx cdk deploy --all --require-approval never` (or with approval, adjustable)
+- [x] Maps env vars to CDK `--context` flags
+- [x] Runs `cd cdk && npx cdk deploy --all --require-approval never` (or with approval, adjustable)
 
 ### Phase 6 Success Criteria
 
-- [ ] `scripts/setup-secrets.sh` is executable and idempotent (running twice produces no errors, doesn't overwrite existing values)
-- [ ] After running `setup-secrets.sh`, `aws ssm get-parameter --name /cavewiki/mediawiki-secret-key` and `aws ssm get-parameter --name /cavewiki/mediawiki-upgrade-key` return valid parameters
-- [ ] `scripts/deploy.sh` is executable and exits with a clear error when any required env var (`CAVEWIKI_DOMAIN`, `CAVEWIKI_HOSTED_ZONE_ID`, `CAVEWIKI_HOSTED_ZONE_NAME`, `CAVEWIKI_CERTIFICATE_ARN`) is unset
-- [ ] `scripts/deploy.sh` passes all context values correctly (verify by running with `--dry-run` or checking the generated `cdk deploy` command)
+- [x] `scripts/setup-secrets.sh` is executable and idempotent (running twice produces no errors, doesn't overwrite existing values)
+- [x] After running `setup-secrets.sh`, `aws ssm get-parameter --name /cavewiki/mediawiki-secret-key` and `aws ssm get-parameter --name /cavewiki/mediawiki-upgrade-key` return valid parameters
+- [x] `scripts/deploy.sh` is executable and exits with a clear error when any required env var (`CAVEWIKI_DOMAIN`, `CAVEWIKI_HOSTED_ZONE_ID`, `CAVEWIKI_HOSTED_ZONE_NAME`, `CAVEWIKI_CERTIFICATE_ARN`) is unset
+- [x] `scripts/deploy.sh` passes all context values correctly (verify by running with `--dry-run` or checking the generated `cdk deploy` command)
 - [ ] Full deploy cycle completes: `./scripts/setup-secrets.sh && ./scripts/deploy.sh` runs end-to-end
 
 ---
@@ -330,15 +327,12 @@ Environment variables are already available in the shell (sourced automatically 
 
 ### Aurora Scale-to-Zero Validation
 
-Validates that Aurora's auto-pause/resume behavior is compatible with the 60-second `connectTimeout` configured in `LocalSettings.php`. This can be performed by an agent via ECS Exec.
+Validates that Aurora's auto-pause/resume behavior is compatible with the 60-second `connectTimeout` configured in `LocalSettings.php`.
 
 **Process:**
 
 1. Confirm Aurora cluster is auto-paused: `aws rds describe-db-clusters --query 'DBClusters[?contains(DBClusterIdentifier, ``cavewiki``)].Status' --output text` should return `stopped` or show paused indicator
-2. From the Fargate container (via ECS Exec), time a cold-start connection:
-   ```
-   time mysql -h "$MW_DB_HOST" -u admin -p"$MW_DB_PASSWORD" -e "SELECT 1"
-   ```
+2. Trigger a cold-start connection by browsing to `https://{domainName}` (or via `curl`). The first request after Aurora pauses will wait for resume.
 3. If the connection does not succeed within 60 seconds, the wiki will show a timeout error on first request after Aurora pauses
 
 - [ ] Aurora resumes and completes the connection within 60 seconds
@@ -346,10 +340,11 @@ Validates that Aurora's auto-pause/resume behavior is compatible with the 60-sec
 
 ### Initial MediaWiki Installation
 
-- [ ] `aws ecs execute-command` into running Fargate task (confirms ECS Exec is working)
-- [ ] Run `php maintenance/install.php` with DB credentials (see IMPLEMENTATION.md for full command)
-- [ ] Run `php maintenance/update.php --quick` (Semantic MediaWiki table setup)
-- [ ] Create initial admin user
+ECS Exec is not available in IPv6-only mode. Use `aws ecs run-task` with a command override to run setup commands in a one-off task (same task definition, same network config, custom command).
+
+- [ ] Run `php maintenance/install.php` via one-off ECS `run-task` with command override (see IMPLEMENTATION.md for full command)
+- [ ] Run `php maintenance/update.php --quick` via one-off ECS `run-task` (Semantic MediaWiki table setup)
+- [ ] Verify initial admin user was created by `install.php`
 
 ### Functional Verification
 

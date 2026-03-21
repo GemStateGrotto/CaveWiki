@@ -39,6 +39,15 @@ Keep concise: note what changed and why. Don't list design decisions or key feat
 
 When you learn something project-specific that would typically go into agent memory, add it to this file instead so other contributors and agents benefit too.
 
+### Networking
+
+- The devcontainer does **not** have IPv6 connectivity. Do not run DNS resolution or connectivity tests from it and treat the results as representative of what Fargate tasks will experience.
+- Do not assume which AWS service endpoints support IPv6 without verified evidence. Test from an environment with IPv6 (e.g., CloudShell) or cite official documentation.
+
+### URLs and References
+
+- If the user sends a URL and you cannot retrieve it, **stop immediately and say so**. Do not proceed as if you have the information.
+
 ## Actions Requiring Explicit Approval
 
 Never perform these actions unless the user directly requests or approves them:

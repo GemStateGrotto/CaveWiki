@@ -68,12 +68,12 @@ Aurora database credentials are managed automatically by CDK — stored in Secre
 | Authentication | MediaWiki built-in | Simplest approach; disable anonymous read/edit/createaccount in `LocalSettings.php` |
 | Domain management | Route 53 | Simplifies CloudFront + origin DNS; single service for both public and origin records |
 | ACM certificate | User-provided ARN | Outside CDK scope; avoids coupling the deployment to certificate lifecycle |
-| Docker image | Official `mediawiki:1.41-apache` + customization | Reliable base, add SMW via Composer layer |
+| Docker image | Official `mediawiki:1.45` + customization | Reliable base, add SMW via Composer layer |
 | Container registry | CDK `DockerImageAsset` → ECR | Automatic; CDK builds, tags, and pushes the image to a CDK-managed ECR repo |
 | Database secrets | CDK-managed Secrets Manager | Free for RDS-managed credentials; auto-generated, auto-rotatable |
 | MediaWiki secrets | SSM Parameter Store SecureString | Cheaper than Secrets Manager ($0 vs $0.40/secret/mo); created once via script |
 | VPC design | Public subnets only, dual-stack (IPv6), no NAT | Cheapest option; IPv6 avoids public IPv4 charge ($3.60/mo); NAT Gateway costs $32+/mo |
-| Fargate networking | IPv6 public, no public IPv4 | `assignPublicIp: false`; ENI gets private IPv4 (VPC) + public IPv6 (internet); CloudFront connects over IPv6 |
+| Fargate networking | Dual-stack, public IPv4 + IPv6 | `assignPublicIp: true`; the ECS agent resolves AWS service endpoints (SSM, Secrets Manager, ECR) over IPv4 — without a public IPv4 or NAT, secret injection fails. CloudFront connects over IPv6. |
 | Fargate SG ingress | `::/0` on port 80 | CloudFront connects over IPv6; custom origin header (`X-Origin-Verify`) validators requests at Apache layer |
 | CloudFront origin | Lambda-updated Route 53 AAAA record | Fargate IPv6 addresses are assigned per-task; Lambda on ECS task state change event updates a Route 53 AAAA record (TTL 60s) for CloudFront |
 | Origin access control | Custom origin header (`X-Origin-Verify`) | CloudFront injects a secret header; Apache returns 403 without it. Ensures only our distribution can reach the origin. Secret stored in SSM, injected into both CloudFront and the container |
@@ -137,12 +137,12 @@ Based on us-west-2 pricing for light usage (a few users, sporadic access):
 
 | Resource | Monthly Estimate |
 |---|---|
-| Fargate (0.5 vCPU / 1 GB, 24/7, IPv6 — no public IPv4 charge) | ~$29 |
+| Fargate (0.5 vCPU / 1 GB, 24/7, dual-stack with public IPv4) | ~$33 |
 | Aurora Serverless v2 (mostly paused, occasional use) | ~$2–5 |
 | EFS (minimal storage, Elastic throughput) | ~$1 |
 | CloudFront (light traffic, no caching) | ~$1 |
 | Route 53 hosted zone | $0.50 |
 | ECR / Lambda / CloudWatch / misc | ~$0.50 |
-| **Total** | **~$35–40/mo** |
+| **Total** | **~$38–43/mo** |
 
 The main cost driver is Fargate at ~$29/mo. To stop paying for compute while preserving data: `cd cdk && npx cdk destroy CaveWikiCompute`.

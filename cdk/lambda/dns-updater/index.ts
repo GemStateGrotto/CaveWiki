@@ -1,0 +1,100 @@
+import { ECSClient, DescribeTasksCommand } from '@aws-sdk/client-ecs';
+import { EC2Client, DescribeNetworkInterfacesCommand } from '@aws-sdk/client-ec2';
+import { Route53Client, ChangeResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
+
+const ecs = new ECSClient({});
+const ec2 = new EC2Client({});
+const r53 = new Route53Client({});
+
+const HOSTED_ZONE_ID = process.env.HOSTED_ZONE_ID!;
+const ORIGIN_RECORD_NAME = process.env.ORIGIN_RECORD_NAME!;
+const HOSTED_ZONE_NAME = process.env.HOSTED_ZONE_NAME!;
+
+interface EcsTaskStateChangeEvent {
+  detail: {
+    taskArn: string;
+    clusterArn: string;
+    lastStatus: string;
+    attachments?: Array<{
+      type: string;
+      status: string;
+      details?: Array<{ name: string; value: string }>;
+    }>;
+  };
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function handler(event: EcsTaskStateChangeEvent): Promise<void> {
+  const { taskArn, clusterArn } = event.detail;
+  console.log(`Task state change: ${taskArn} in cluster ${clusterArn}`);
+
+  // Describe the task to get ENI attachment
+  const describeResult = await ecs.send(
+    new DescribeTasksCommand({ cluster: clusterArn, tasks: [taskArn] }),
+  );
+
+  const task = describeResult.tasks?.[0];
+  if (!task) {
+    console.error('Task not found');
+    return;
+  }
+
+  // Find the ENI attachment
+  const eniAttachment = task.attachments?.find((a) => a.type === 'ElasticNetworkInterface');
+  const eniId = eniAttachment?.details?.find((d) => d.name === 'networkInterfaceId')?.value;
+  if (!eniId) {
+    console.error('No ENI found on task');
+    return;
+  }
+
+  console.log(`Found ENI: ${eniId}`);
+
+  // Get IPv6 address with retries (may not be assigned immediately)
+  let ipv6Address: string | undefined;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const eniResult = await ec2.send(
+      new DescribeNetworkInterfacesCommand({ NetworkInterfaceIds: [eniId] }),
+    );
+    const eni = eniResult.NetworkInterfaces?.[0];
+    ipv6Address = eni?.Ipv6Addresses?.[0]?.Ipv6Address;
+
+    if (ipv6Address) {
+      break;
+    }
+    console.log(`IPv6 not yet assigned (attempt ${attempt}/3), waiting 5s...`);
+    await sleep(5000);
+  }
+
+  if (!ipv6Address) {
+    console.error('IPv6 address not assigned after 3 attempts');
+    return;
+  }
+
+  console.log(`IPv6 address: ${ipv6Address}`);
+
+  // UPSERT the AAAA record
+  const fqdn = `${ORIGIN_RECORD_NAME}.${HOSTED_ZONE_NAME}`;
+  await r53.send(
+    new ChangeResourceRecordSetsCommand({
+      HostedZoneId: HOSTED_ZONE_ID,
+      ChangeBatch: {
+        Changes: [
+          {
+            Action: 'UPSERT',
+            ResourceRecordSet: {
+              Name: fqdn,
+              Type: 'AAAA',
+              TTL: 60,
+              ResourceRecords: [{ Value: ipv6Address }],
+            },
+          },
+        ],
+      },
+    }),
+  );
+
+  console.log(`Updated AAAA record: ${fqdn} -> ${ipv6Address}`);
+}
