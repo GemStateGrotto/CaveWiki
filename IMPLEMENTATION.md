@@ -72,9 +72,9 @@ Aurora database credentials are managed automatically by CDK — stored in Secre
 | Container registry | CDK `DockerImageAsset` → ECR | Automatic; CDK builds, tags, and pushes the image to a CDK-managed ECR repo |
 | Database secrets | CDK-managed Secrets Manager | Free for RDS-managed credentials; auto-generated, auto-rotatable |
 | MediaWiki secrets | SSM Parameter Store SecureString | Cheaper than Secrets Manager ($0 vs $0.40/secret/mo); created once via script |
-| VPC design | Public subnets only, dual-stack (IPv6), no NAT | Cheapest option; IPv6 avoids public IPv4 charge ($3.60/mo); NAT Gateway costs $32+/mo |
-| Fargate networking | Dual-stack, public IPv4 + IPv6 | `assignPublicIp: true`; the ECS agent resolves AWS service endpoints (SSM, Secrets Manager, ECR) over IPv4 — without a public IPv4 or NAT, secret injection fails. CloudFront connects over IPv6. |
-| Fargate SG ingress | `::/0` on port 80 | CloudFront connects over IPv6; custom origin header (`X-Origin-Verify`) validators requests at Apache layer |
+| VPC design | Dual-stack public subnets + IPv6-only public subnets, no NAT | Dual-stack subnets host Aurora/EFS (need IPv4); IPv6-only subnets host Fargate (no public IPv4, no IPv4 charge). No NAT Gateway ($32+/mo saved). |
+| Fargate networking | IPv6-only, no public IPv4 | `assignPublicIp: false` in IPv6-only subnets. CloudFront connects over IPv6. Eliminates $3.60/mo public IPv4 charge. |
+| Fargate SG ingress | `::/0` on port 80 | CloudFront connects over IPv6; custom origin header (`X-Origin-Verify`) validates requests at Apache layer |
 | CloudFront origin | Lambda-updated Route 53 AAAA record | Fargate IPv6 addresses are assigned per-task; Lambda on ECS task state change event updates a Route 53 AAAA record (TTL 60s) for CloudFront |
 | Origin access control | Custom origin header (`X-Origin-Verify`) | CloudFront injects a secret header; Apache returns 403 without it. Ensures only our distribution can reach the origin. Secret stored in SSM, injected into both CloudFront and the container |
 | CloudFront caching | Disabled (full passthrough) | MediaWiki serves dynamic, authenticated content; caching would break auth |
@@ -92,44 +92,53 @@ Aurora database credentials are managed automatically by CDK — stored in Secre
 - **Origin restricted to CloudFront**: Apache validates a custom `X-Origin-Verify` header on every request. CloudFront injects this header with a shared secret (stored in SSM). Direct requests without the header receive 403.
 - **Database not publicly accessible**: Aurora is in public subnets but its security group only allows inbound from the Fargate security group on port 3306
 - **EFS restricted**: Security group only allows inbound NFS (2049) from the Fargate security group
-- **ECS Exec enabled**: For initial setup and debugging; restrict IAM access to `ecs:ExecuteCommand` in production
+- **ECS Exec not available**: ECS Exec is not supported in IPv6-only mode. Use `aws ecs run-task` with command overrides for initial setup and debugging.
 
 ## Initial MediaWiki Installation
 
-After the first deploy, the database is empty. Shell into the running container and run the installer. Replace placeholder values below with your chosen admin username and password.
+After the first deploy, the database is empty. ECS Exec is not available in IPv6-only mode, so use `aws ecs run-task` with a command override to run setup commands in a one-off task (same task definition, same network config, custom command). Replace placeholder values below with your chosen admin username and password.
 
 ```bash
-# Find the running task
+# Find the cluster and task definition
 CLUSTER_ARN=$(aws ecs list-clusters --query 'clusterArns[?contains(@, `CaveWiki`)]' --output text)
-TASK_ARN=$(aws ecs list-tasks --cluster "$CLUSTER_ARN" --query 'taskArns[0]' --output text)
+TASK_DEF=$(aws ecs list-task-definitions --family-prefix CaveWikiCompute --sort DESC --query 'taskDefinitionArns[0]' --output text)
 
-# Open a shell in the mediawiki container
-aws ecs execute-command \
+# Run install.php as a one-off task
+aws ecs run-task \
   --cluster "$CLUSTER_ARN" \
-  --task "$TASK_ARN" \
-  --container mediawiki \
-  --interactive \
-  --command "/bin/bash"
+  --task-definition "$TASK_DEF" \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[<ipv6-only-subnet-id>],securityGroups=[<fargate-sg-id>],assignPublicIp=DISABLED}" \
+  --overrides '{
+    "containerOverrides": [{
+      "name": "mediawiki",
+      "command": ["php", "maintenance/install.php",
+        "--dbserver", "$MW_DB_HOST",
+        "--dbname", "cavewiki",
+        "--dbuser", "admin",
+        "--dbpass", "$MW_DB_PASSWORD",
+        "--server", "$MW_SERVER",
+        "--scriptpath", "",
+        "--pass", "<your-admin-password>",
+        "CaveWiki", "<your-admin-username>"]
+    }]
+  }'
 
-# Inside the container:
-php maintenance/install.php \
-  --dbserver "$MW_DB_HOST" \
-  --dbname "${MW_DB_NAME:-cavewiki}" \
-  --dbuser admin \
-  --dbpass "$MW_DB_PASSWORD" \
-  --server "$MW_SERVER" \
-  --scriptpath "" \
-  --pass "<your-admin-password>" \
-  "${MW_SITENAME:-CaveWiki}" \
-  "<your-admin-username>"
-
-# Set up Semantic MediaWiki tables
-php maintenance/update.php --quick
-
-exit
+# Then run update.php for Semantic MediaWiki tables
+aws ecs run-task \
+  --cluster "$CLUSTER_ARN" \
+  --task-definition "$TASK_DEF" \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[<ipv6-only-subnet-id>],securityGroups=[<fargate-sg-id>],assignPublicIp=DISABLED}" \
+  --overrides '{
+    "containerOverrides": [{
+      "name": "mediawiki",
+      "command": ["php", "maintenance/update.php", "--quick"]
+    }]
+  }'
 ```
 
-> **Note**: The cluster lookup above matches by name substring. If you have multiple ECS clusters containing "CaveWiki", set `CLUSTER_ARN` explicitly. The wiki name and admin username are parameterized via environment variables and arguments respectively — adjust them for your deployment.
+> **Note**: The cluster lookup above matches by name substring. If you have multiple ECS clusters containing "CaveWiki", set `CLUSTER_ARN` explicitly. Replace `<ipv6-only-subnet-id>` and `<fargate-sg-id>` with actual values from the CloudFormation outputs.
 
 ## Cost Estimate
 
@@ -137,12 +146,12 @@ Based on us-west-2 pricing for light usage (a few users, sporadic access):
 
 | Resource | Monthly Estimate |
 |---|---|
-| Fargate (0.5 vCPU / 1 GB, 24/7, dual-stack with public IPv4) | ~$33 |
+| Fargate (0.5 vCPU / 1 GB, 24/7, IPv6-only — no public IPv4) | ~$29 |
 | Aurora Serverless v2 (mostly paused, occasional use) | ~$2–5 |
 | EFS (minimal storage, Elastic throughput) | ~$1 |
 | CloudFront (light traffic, no caching) | ~$1 |
 | Route 53 hosted zone | $0.50 |
 | ECR / Lambda / CloudWatch / misc | ~$0.50 |
-| **Total** | **~$38–43/mo** |
+| **Total** | **~$34–38/mo** |
 
-The main cost driver is Fargate at ~$29/mo. To stop paying for compute while preserving data: `cd cdk && npx cdk destroy CaveWikiCompute`.
+The main cost driver is Fargate at ~$29/mo (no public IPv4 charge). To stop paying for compute while preserving data: `cd cdk && npx cdk destroy CaveWikiCompute`.

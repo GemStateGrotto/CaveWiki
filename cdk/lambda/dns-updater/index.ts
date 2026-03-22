@@ -1,4 +1,4 @@
-import { ECSClient, DescribeTasksCommand } from '@aws-sdk/client-ecs';
+import { ECSClient, DescribeTasksCommand, ListTasksCommand } from '@aws-sdk/client-ecs';
 import { EC2Client, DescribeNetworkInterfacesCommand } from '@aws-sdk/client-ec2';
 import { Route53Client, ChangeResourceRecordSetsCommand } from '@aws-sdk/client-route-53';
 
@@ -31,16 +31,36 @@ export async function handler(event: EcsTaskStateChangeEvent): Promise<void> {
   const { taskArn, clusterArn } = event.detail;
   console.log(`Task state change: ${taskArn} in cluster ${clusterArn}`);
 
-  // Describe the task to get ENI attachment
-  const describeResult = await ecs.send(
-    new DescribeTasksCommand({ cluster: clusterArn, tasks: [taskArn] }),
+  // During rolling deployments, multiple tasks emit RUNNING events.
+  // Always resolve the newest RUNNING task to avoid stale AAAA records.
+  const listResult = await ecs.send(
+    new ListTasksCommand({ cluster: clusterArn, desiredStatus: 'RUNNING' }),
   );
-
-  const task = describeResult.tasks?.[0];
-  if (!task) {
-    console.error('Task not found');
+  const runningTaskArns = listResult.taskArns ?? [];
+  if (runningTaskArns.length === 0) {
+    console.log('No running tasks found');
     return;
   }
+
+  const describeResult = await ecs.send(
+    new DescribeTasksCommand({ cluster: clusterArn, tasks: runningTaskArns }),
+  );
+  const tasks = describeResult.tasks ?? [];
+  if (tasks.length === 0) {
+    console.error('DescribeTasks returned no tasks');
+    return;
+  }
+
+  // Prefer healthy tasks; fall back to newest running task if none are healthy yet
+  // (happens on fresh start before the first health check passes).
+  const healthyTasks = tasks.filter((t) => t.healthStatus === 'HEALTHY');
+  const candidates = healthyTasks.length > 0 ? healthyTasks : tasks;
+
+  // Pick the candidate that started most recently
+  const task = candidates.reduce((newest, t) =>
+    (t.startedAt ?? 0) > (newest.startedAt ?? 0) ? t : newest,
+  );
+  console.log(`Newest running task: ${task.taskArn} (started ${task.startedAt})`);
 
   // Find the ENI attachment
   const eniAttachment = task.attachments?.find((a) => a.type === 'ElasticNetworkInterface');

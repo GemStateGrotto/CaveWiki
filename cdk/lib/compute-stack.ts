@@ -24,7 +24,10 @@ import { CaveWikiConfig } from './config';
 
 export interface ComputeStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
+  ipv6OnlySubnets: ec2.ISubnet[];
   fargateSg: ec2.ISecurityGroup;
+  auroraSg: ec2.ISecurityGroup;
+  efsSg: ec2.ISecurityGroup;
   dbCluster: rds.IDatabaseCluster;
   dbSecret: secretsmanager.ISecret;
   fileSystem: efs.IFileSystem;
@@ -36,7 +39,7 @@ export class ComputeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
 
-    const { vpc, fargateSg, dbCluster, dbSecret, fileSystem, accessPoint, config } = props;
+    const { vpc, ipv6OnlySubnets, fargateSg, auroraSg, efsSg, dbCluster, dbSecret, fileSystem, accessPoint, config } = props;
 
     // --- SSM Parameters (read existing) ---
     const ssmSecretKey = ssm.StringParameter.fromSecureStringParameterAttributes(this, 'SsmSecretKey', {
@@ -56,6 +59,12 @@ export class ComputeStack extends cdk.Stack {
     const imageAsset = new ecr_assets.DockerImageAsset(this, 'MediawikiImage', {
       directory: path.join(__dirname, '..', '..', 'docker', 'mediawiki'),
     });
+
+    // Construct dual-stack ECR image URI so Fargate in IPv6-only subnets can
+    // pull the image over native IPv6 (the standard .amazonaws.com endpoint is
+    // IPv4-only). Format: <account>.dkr-ecr.<region>.on.aws/<repo>:<tag>
+    const dualStackImageUri = `${this.account}.dkr-ecr.${this.region}.on.aws/${imageAsset.repository.repositoryName}:${imageAsset.imageTag}`;
+    const mediawikiImage = ecs.ContainerImage.fromRegistry(dualStackImageUri);
 
     // --- Task Definition ---
     const taskDef = new ecs.FargateTaskDefinition(this, 'TaskDef', {
@@ -81,7 +90,7 @@ export class ComputeStack extends cdk.Stack {
 
     // --- Main container (mediawiki) ---
     const mediawikiContainer = taskDef.addContainer('mediawiki', {
-      image: ecs.ContainerImage.fromDockerImageAsset(imageAsset),
+      image: mediawikiImage,
       essential: true,
       portMappings: [{ containerPort: 80 }],
       environment: {
@@ -97,7 +106,7 @@ export class ComputeStack extends cdk.Stack {
         MW_ORIGIN_VERIFY: ecs.Secret.fromSsmParameter(ssmOriginVerify),
       },
       healthCheck: {
-        command: ['CMD-SHELL', 'curl -f http://localhost/api.php || exit 1'],
+        command: ['CMD-SHELL', 'curl -s -o /dev/null http://localhost/api.php || exit 1'],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(10),
         retries: 3,
@@ -117,7 +126,7 @@ export class ComputeStack extends cdk.Stack {
 
     // --- Sidecar container (jobrunner) ---
     const jobrunnerContainer = taskDef.addContainer('jobrunner', {
-      image: ecs.ContainerImage.fromDockerImageAsset(imageAsset),
+      image: mediawikiImage,
       essential: false,
       command: ['/usr/local/bin/jobrunner.sh'],
       environment: {
@@ -144,16 +153,20 @@ export class ComputeStack extends cdk.Stack {
       readOnly: false,
     });
 
+    // Grant ECR pull to the execution role (needed since we use fromRegistry
+    // with the dual-stack URI instead of fromDockerImageAsset which auto-grants).
+    // Must be after addContainer() calls — the execution role is lazily created.
+    imageAsset.repository.grantPull(taskDef.executionRole!);
+
     // --- ECS Service ---
-    // assignPublicIp must be true: the ECS agent resolves AWS service endpoints
-    // (SSM, Secrets Manager, ECR, CloudWatch) over IPv4. Without a public IPv4 or
-    // NAT, secret injection and image pull fail with "context deadline exceeded".
+    // IPv6-only subnets: no public IPv4 assigned, Fargate communicates over IPv6.
     const service = new ecs.FargateService(this, 'Service', {
       cluster,
       taskDefinition: taskDef,
       desiredCount: 1,
-      assignPublicIp: true,
-      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      minHealthyPercent: 50,
+      assignPublicIp: false,
+      vpcSubnets: { subnets: ipv6OnlySubnets },
       securityGroups: [fargateSg],
       enableExecuteCommand: true,
     });
@@ -174,7 +187,7 @@ export class ComputeStack extends cdk.Stack {
     // IAM permissions for Lambda (least-privilege)
     dnsUpdater.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['ecs:DescribeTasks'],
+        actions: ['ecs:DescribeTasks', 'ecs:ListTasks'],
         resources: ['*'],
         conditions: {
           ArnEquals: { 'ecs:cluster': cluster.clusterArn },
@@ -194,14 +207,16 @@ export class ComputeStack extends cdk.Stack {
       }),
     );
 
-    // EventBridge rule: ECS task state change → RUNNING
+    // EventBridge rule: any ECS task state change in this cluster.
+    // The Lambda is idempotent — it lists running tasks, prefers the newest
+    // healthy one, and UPSERTs the AAAA record. Every event is just
+    // "re-evaluate and converge," so no need to filter by lastStatus.
     const rule = new events.Rule(this, 'TaskRunningRule', {
       eventPattern: {
         source: ['aws.ecs'],
         detailType: ['ECS Task State Change'],
         detail: {
           clusterArn: [cluster.clusterArn],
-          lastStatus: ['RUNNING'],
         },
       },
     });
@@ -244,6 +259,7 @@ export class ComputeStack extends cdk.Stack {
       defaultBehavior: {
         origin: new origins.HttpOrigin(originFqdn, {
           protocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+          ipAddressType: cloudfront.OriginIpAddressType.IPV6,
           customHeaders: {
             'X-Origin-Verify': originVerifyValue,
           },
@@ -274,6 +290,54 @@ export class ComputeStack extends cdk.Stack {
       recordName: config.domainName,
       target: route53.RecordTarget.fromAlias(new route53Targets.CloudFrontTarget(distribution)),
     });
+
+    // --- Debug EC2 instance in IPv6-only subnet (for network diagnostics) ---
+    // SSM Agent is configured via user data to use dual-stack endpoints so it
+    // can phone home from the IPv6-only subnet (default agent uses IPv4-only endpoints).
+    const debugSg = new ec2.SecurityGroup(this, 'DebugSg', {
+      vpc,
+      description: 'Debug instance - outbound only',
+      allowAllOutbound: true,
+      allowAllIpv6Outbound: true,
+    });
+
+    const debugInstance = new ec2.Instance(this, 'DebugInstance', {
+      vpc,
+      vpcSubnets: { subnets: ipv6OnlySubnets },
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+      machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+      securityGroup: debugSg,
+      ssmSessionPermissions: true,
+    });
+
+    // Configure SSM Agent to use dual-stack endpoints (required for IPv6-only subnets)
+    debugInstance.addUserData(
+      'mkdir -p /etc/amazon/ssm',
+      `printf \'{"Agent":{"Region":"${this.region}","UseDualStackEndpoint":true}}\\n\' > /etc/amazon/ssm/amazon-ssm-agent.json`,
+      'systemctl restart amazon-ssm-agent',
+    );
+
+    // Allow debug instance to reach Aurora and EFS (same as Fargate).
+    // Uses L1 CfnSecurityGroupIngress so the rules live in this stack's template,
+    // avoiding a cross-stack dependency cycle (Network → Compute).
+    new ec2.CfnSecurityGroupIngress(this, 'DebugToAurora', {
+      groupId: auroraSg.securityGroupId,
+      ipProtocol: 'tcp',
+      fromPort: 3306,
+      toPort: 3306,
+      sourceSecurityGroupId: debugSg.securityGroupId,
+      description: 'MySQL from debug instance',
+    });
+    new ec2.CfnSecurityGroupIngress(this, 'DebugToEfs', {
+      groupId: efsSg.securityGroupId,
+      ipProtocol: 'tcp',
+      fromPort: 2049,
+      toPort: 2049,
+      sourceSecurityGroupId: debugSg.securityGroupId,
+      description: 'NFS from debug instance',
+    });
+
+    new cdk.CfnOutput(this, 'DebugInstanceId', { value: debugInstance.instanceId });
 
     // Stack outputs
     new cdk.CfnOutput(this, 'ClusterArn', { value: cluster.clusterArn });

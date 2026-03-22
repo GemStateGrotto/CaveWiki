@@ -36,6 +36,7 @@ export class StorageStack extends cdk.Stack {
       securityGroups: [props.auroraSg],
       credentials: rds.Credentials.fromGeneratedSecret('admin'),
       defaultDatabaseName: 'cavewiki',
+      networkType: rds.NetworkType.DUAL,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -49,6 +50,11 @@ export class StorageStack extends cdk.Stack {
       throughputMode: efs.ThroughputMode.ELASTIC,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
+
+    // Override mount targets to dual-stack so IPv6-only Fargate tasks can reach EFS
+    fileSystem.node.children
+      .filter((c): c is efs.CfnMountTarget => c instanceof efs.CfnMountTarget)
+      .forEach((mt) => { mt.ipAddressType = 'DUAL_STACK'; });
 
     const accessPoint = fileSystem.addAccessPoint('MediawikiImages', {
       path: '/mediawiki-images',
