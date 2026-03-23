@@ -22,6 +22,9 @@ $wgScriptPath = '';
 $wgSecretKey  = getenv( 'MW_SECRET_KEY' );
 $wgUpgradeKey = getenv( 'MW_UPGRADE_KEY' );
 
+## Password policy
+$wgPasswordPolicy['policies']['default']['MinimalPasswordLength'] = 8;
+
 ## Private wiki — no anonymous access
 $wgGroupPermissions['*']['read']          = false;
 $wgGroupPermissions['*']['edit']          = false;
@@ -31,6 +34,9 @@ $wgGroupPermissions['*']['createaccount'] = false;
 $wgEnableUploads  = true;
 $wgUploadPath     = "$wgScriptPath/images";
 $wgUploadDirectory = '/var/www/html/images';
+
+## Skin
+wfLoadSkin( 'Vector' );
 
 ## Semantic MediaWiki
 wfLoadExtension( 'SemanticMediaWiki' );

@@ -12,6 +12,12 @@ COPY composer.local.json /var/www/html/composer.local.json
 RUN COMPOSER_ROOT_VERSION=1.45.0 composer config --global audit.block-insecure false \
     && COMPOSER_ROOT_VERSION=1.45.0 composer update --no-dev --working-dir=/var/www/html
 
+# Fix SMW 6.0.1 SchemaContentHandler for MW 1.45 (constructor signature changed).
+# Upstream fix: https://github.com/SemanticMediaWiki/SemanticMediaWiki/pull/6254
+# (merged to main, not yet in a stable release). Remove this sed when SMW >= 6.1.
+RUN sed -i "s/parent::__construct( CONTENT_MODEL_SMW_SCHEMA, \[ CONTENT_FORMAT_JSON \] );/parent::__construct( CONTENT_MODEL_SMW_SCHEMA );/" \
+    /var/www/html/extensions/SemanticMediaWiki/src/MediaWiki/Content/SchemaContentHandler.php
+
 # Copy configuration files
 COPY LocalSettings.php /var/www/html/LocalSettings.php
 COPY origin-verify.conf /etc/apache2/conf-enabled/origin-verify.conf

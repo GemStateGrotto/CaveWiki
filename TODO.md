@@ -147,40 +147,40 @@ After deploying the Compute stack, validate the full origin chain end-to-end.
 
 ### Pre-Deploy Verification
 
-- [ ] `cd cdk && npx cdk synth` — all three CloudFormation templates synthesize without errors
-- [ ] `docker build docker/mediawiki/` — Docker image builds successfully
+- [x] `cd cdk && npx cdk synth` — all three CloudFormation templates synthesize without errors
+- [x] `docker build docker/mediawiki/` — Docker image builds successfully
 
 ### Deploy
 
-- [ ] `./scripts/deploy.sh` — all three stacks deployed
+- [x] `./scripts/deploy.sh` — all three stacks deployed
 
 ### Post-Deploy Infrastructure Checks
 
-- [ ] All three stacks show CREATE_COMPLETE in CloudFormation console
-- [ ] EC2 instance running, registered in ECS cluster
-- [ ] ECS task reaches RUNNING state with both containers healthy
-- [ ] EBS volume attached and mounted at `/mnt/data`
-- [ ] Route 53: origin AAAA record populated by user data
-- [ ] CloudFront distribution status is "Deployed"
-- [ ] `curl -I https://{domainName}` returns a response via CloudFront
+- [x] All three stacks show CREATE_COMPLETE / UPDATE_COMPLETE in CloudFormation
+- [x] EC2 instance running, registered in ECS cluster
+- [x] ECS task reaches RUNNING state with both containers healthy
+- [x] EBS volume attached and mounted at `/mnt/data`
+- [x] Route 53: origin AAAA record populated by user data
+- [x] CloudFront distribution status is "Deployed"
+- [ ] `curl -I https://{domainName}` returns a response via CloudFront (cannot verify from devcontainer)
 
 ### Initial MediaWiki Installation
 
 Use SSM Session Manager to connect to the EC2 host and `docker exec` into the running mediawiki container. See [IMPLEMENTATION.md](IMPLEMENTATION.md#initial-mediawiki-installation) for full commands.
 
-- [ ] Run `php maintenance/install.php` with `--dbtype sqlite` (creates SQLite database on EBS volume)
-- [ ] Run `php maintenance/update.php --quick` (Semantic MediaWiki table setup)
-- [ ] Verify initial admin user was created by `install.php`
+- [x] Run `php maintenance/install.php` with `--dbtype sqlite` (creates SQLite database on EBS volume)
+- [x] Run `php maintenance/update.php --quick` (requires SMW SchemaContentHandler sed patch — see [Future Enhancements](#smw-schemacontenthandler-patch))
+- [x] Verify initial admin user was created by `install.php`
 
 ### Functional Verification
 
-- [ ] Browse to `https://{domainName}` — redirects to login page (not the wiki content)
-- [ ] Log in with admin credentials — wiki main page loads
-- [ ] In an incognito/private window, `https://{domainName}` shows only a login form (anonymous read blocked)
-- [ ] Create a test page with Semantic MediaWiki annotations (e.g., `[[Has type::Page]]`) — page saves without errors
-- [ ] Upload a test file — upload succeeds, file is accessible after upload
+- [x] Browse to `https://{domainName}` — redirects to login page (not the wiki content)
+- [ ] Log in with admin credentials — wiki main page loads (**blocked**: login fails with "your browser does not support cookies" — see [Cookie / Session Bug](#cookie--session-bug) below)
+- [x] In an incognito/private window, `https://{domainName}` shows only a login form (anonymous read blocked)
+- [ ] Create a test page with Semantic MediaWiki annotations (e.g., `[[Has type::Page]]`) — page saves without errors (blocked on login)
+- [ ] Upload a test file — upload succeeds, file is accessible after upload (blocked on login)
 - [ ] Force instance replacement — after restart, uploaded file and wiki content still exist (confirms EBS and EFS persistence)
-- [ ] Check CloudWatch Logs: the `jobrunner` log stream shows job processing output
+- [x] Check CloudWatch Logs / docker logs: the `jobrunner` log stream shows job processing output
 
 ---
 
@@ -247,6 +247,25 @@ These are not part of the current build but are tracked for later iterations.
 ### Security Hardening
 
 - [ ] Restrict ECS SG inbound to CloudFront managed prefix list (`com.amazonaws.global.cloudfront.origin-facing`) in addition to the custom origin header (defense-in-depth)
+
+### Cookie / Session Bug
+
+MediaWiki login fails with "your browser does not support cookies" in both Chrome and the VS Code embedded browser. The login form renders correctly and accepts credentials, but the post-login redirect loses the session. This is not a browser limitation — it reproduces across browsers.
+
+Likely causes to investigate:
+- CloudFront cookie forwarding: the `ALL_VIEWER` origin request policy should forward cookies, but verify `Set-Cookie` headers survive the CloudFront → origin → CloudFront round-trip
+- `$wgServer` / cookie domain mismatch: `MW_SERVER` is set to `https://{domainName}` but cookies may need explicit `$wgCookieDomain` configuration
+- Secure cookie flags: MediaWiki may set `Secure` cookies that aren't honoured on the CloudFront ↔ HTTP-origin leg
+
+- [ ] Diagnose and fix the cookie/session issue so that browser login works end-to-end
+
+### SMW SchemaContentHandler Patch
+
+The Dockerfile contains a `sed` patch for SMW 6.0.1's `SchemaContentHandler` constructor, which passes an array where MW 1.45 now expects `?ParsoidParserFactory`. This is fragile — it matches a literal string in vendored source and will silently break or become a no-op if either SMW or MW changes the surrounding code.
+
+- Upstream issue: [SemanticMediaWiki#6245](https://github.com/SemanticMediaWiki/SemanticMediaWiki/issues/6245) / [#6273](https://github.com/SemanticMediaWiki/SemanticMediaWiki/issues/6273)
+- Upstream fix: [PR #6254](https://github.com/SemanticMediaWiki/SemanticMediaWiki/pull/6254) (merged to `main`, not yet in a stable release)
+- [ ] When SMW releases >= 6.1 (or whichever version includes #6254), update `composer.local.json` and remove the `sed` patch from the Dockerfile
 
 ### Operational
 
