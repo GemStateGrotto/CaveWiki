@@ -6,8 +6,7 @@ import { Construct } from 'constructs';
 export class NetworkStack extends cdk.Stack {
   public readonly vpc: ec2.IVpc;
   public readonly ipv6OnlySubnets: ec2.ISubnet[];
-  public readonly fargateSg: ec2.ISecurityGroup;
-  public readonly dbSg: ec2.ISecurityGroup;
+  public readonly ecsSg: ec2.ISecurityGroup;
   public readonly efsSg: ec2.ISecurityGroup;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -26,7 +25,7 @@ export class NetworkStack extends cdk.Stack {
       ],
     });
 
-    // --- IPv6-only public subnets for Fargate (no IPv4 CIDR) ---
+    // --- IPv6-only public subnets for ECS EC2 (no IPv4 CIDR) ---
     const igw = vpc.node.findChild('IGW') as ec2.CfnInternetGateway;
     const vpcGw = vpc.node.findChild('VPCGW') as ec2.CfnVPCGatewayAttachment;
     const ipv6CidrBlock = Fn.select(0, vpc.vpcIpv6CidrBlocks);
@@ -70,50 +69,39 @@ export class NetworkStack extends cdk.Stack {
       );
     }
 
-    const fargateSg = new ec2.SecurityGroup(this, 'FargateSg', {
+    // ECS SG: allows HTTP from IPv6 internet (CloudFront connects over IPv6)
+    // Keep the logical ID 'FargateSg' for CloudFormation compatibility with the deployed stack
+    const ecsSg = new ec2.SecurityGroup(this, 'FargateSg', {
       vpc,
-      description: 'Fargate service - allows HTTP from IPv6 internet (CloudFront)',
+      description: 'ECS service - allows HTTP from IPv6 internet (CloudFront)',
       allowAllOutbound: true,
       allowAllIpv6Outbound: true,
     });
-    fargateSg.addIngressRule(
+    ecsSg.addIngressRule(
       ec2.Peer.anyIpv6(),
       ec2.Port.tcp(80),
       'HTTP from IPv6 (CloudFront)',
     );
 
-    const dbSg = new ec2.SecurityGroup(this, 'DbSg', {
-      vpc,
-      description: 'Database - allows MySQL from Fargate only',
-      allowAllOutbound: false,
-    });
-    dbSg.addIngressRule(
-      fargateSg,
-      ec2.Port.tcp(3306),
-      'MySQL from Fargate',
-    );
-
     const efsSg = new ec2.SecurityGroup(this, 'EfsSg', {
       vpc,
-      description: 'EFS - allows NFS from Fargate only',
+      description: 'EFS - allows NFS from ECS only',
       allowAllOutbound: false,
     });
     efsSg.addIngressRule(
-      fargateSg,
+      ecsSg,
       ec2.Port.tcp(2049),
-      'NFS from Fargate',
+      'NFS from ECS',
     );
 
     this.vpc = vpc;
     this.ipv6OnlySubnets = ipv6OnlySubnets;
-    this.fargateSg = fargateSg;
-    this.dbSg = dbSg;
+    this.ecsSg = ecsSg;
     this.efsSg = efsSg;
 
     // Stack outputs
     new cdk.CfnOutput(this, 'VpcId', { value: vpc.vpcId });
-    new cdk.CfnOutput(this, 'FargateSgId', { value: fargateSg.securityGroupId });
-    new cdk.CfnOutput(this, 'DbSgId', { value: dbSg.securityGroupId });
+    new cdk.CfnOutput(this, 'EcsSgId', { value: ecsSg.securityGroupId });
     new cdk.CfnOutput(this, 'EfsSgId', { value: efsSg.securityGroupId });
   }
 }

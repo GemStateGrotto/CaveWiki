@@ -8,12 +8,10 @@ if ( !defined( 'MEDIAWIKI' ) ) {
     exit;
 }
 
-## Database settings
-$wgDBtype     = 'mysql';
-$wgDBserver   = getenv( 'MW_DB_HOST' );
-$wgDBname     = getenv( 'MW_DB_NAME' ) ?: 'cavewiki';
-$wgDBuser     = 'admin';
-$wgDBpassword = getenv( 'MW_DB_PASSWORD' );
+## Database settings — SQLite on EBS volume
+$wgDBtype         = 'sqlite';
+$wgDBname         = 'cavewiki';
+$wgSQLiteDataDir  = '/var/www/html/data';
 
 ## Site configuration
 $wgServer     = getenv( 'MW_SERVER' );

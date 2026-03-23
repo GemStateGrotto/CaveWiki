@@ -3,13 +3,7 @@ import * as cdk from 'aws-cdk-lib/core';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as efs from 'aws-cdk-lib/aws-efs';
-import * as rds from 'aws-cdk-lib/aws-rds';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as lambdaNode from 'aws-cdk-lib/aws-lambda-nodejs';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
@@ -19,19 +13,18 @@ import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
+import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import { Construct } from 'constructs';
 import { CaveWikiConfig } from './config';
 
 export interface ComputeStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
   ipv6OnlySubnets: ec2.ISubnet[];
-  fargateSg: ec2.ISecurityGroup;
-  dbSg: ec2.ISecurityGroup;
+  ecsSg: ec2.ISecurityGroup;
   efsSg: ec2.ISecurityGroup;
-  dbInstance: rds.IDatabaseInstance;
-  dbSecret: secretsmanager.ISecret;
   fileSystem: efs.IFileSystem;
   accessPoint: efs.IAccessPoint;
+  ebsVolume: ec2.IVolume;
   config: CaveWikiConfig;
 }
 
@@ -39,7 +32,7 @@ export class ComputeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
 
-    const { vpc, ipv6OnlySubnets, fargateSg, dbSg, efsSg, dbInstance, dbSecret, fileSystem, accessPoint, config } = props;
+    const { vpc, ipv6OnlySubnets, ecsSg, efsSg, fileSystem, accessPoint, ebsVolume, config } = props;
 
     // --- SSM Parameters (read existing) ---
     const ssmSecretKey = ssm.StringParameter.fromSecureStringParameterAttributes(this, 'SsmSecretKey', {
@@ -52,24 +45,145 @@ export class ComputeStack extends cdk.Stack {
       parameterName: '/cavewiki/origin-verify-secret',
     });
 
-    // --- ECS Cluster ---
+    // --- ECS Cluster with EC2 capacity ---
     const cluster = new ecs.Cluster(this, 'Cluster', { vpc });
 
-    // --- Docker Image Asset ---
+    // --- Docker Image Asset (ARM64 for t4g) ---
     const imageAsset = new ecr_assets.DockerImageAsset(this, 'MediawikiImage', {
       directory: path.join(__dirname, '..', '..', 'docker', 'mediawiki'),
+      platform: ecr_assets.Platform.LINUX_ARM64,
     });
 
-    // Construct dual-stack ECR image URI so Fargate in IPv6-only subnets can
-    // pull the image over native IPv6 (the standard .amazonaws.com endpoint is
-    // IPv4-only). Format: <account>.dkr-ecr.<region>.on.aws/<repo>:<tag>
+    // Dual-stack ECR URI so IPv6-only instances can pull over native IPv6
     const dualStackImageUri = `${this.account}.dkr-ecr.${this.region}.on.aws/${imageAsset.repository.repositoryName}:${imageAsset.imageTag}`;
     const mediawikiImage = ecs.ContainerImage.fromRegistry(dualStackImageUri);
 
-    // --- Task Definition ---
-    const taskDef = new ecs.FargateTaskDefinition(this, 'TaskDef', {
-      cpu: 512,
-      memoryLimitMiB: 1024,
+    // --- EC2 Auto Scaling Group ---
+    // Use the first IPv6-only subnet (single AZ — must match EBS volume)
+    const instanceSubnet = ipv6OnlySubnets[0];
+
+    const userData = ec2.UserData.forLinux();
+
+    // 1. Configure ECS agent
+    userData.addCommands(
+      'mkdir -p /etc/ecs',
+      `echo "ECS_CLUSTER=${cluster.clusterName}" >> /etc/ecs/ecs.config`,
+      'echo "ECS_INSTANCE_IP_COMPATIBILITY=ipv6" >> /etc/ecs/ecs.config',
+    );
+
+    // 2. Configure SSM Agent for dual-stack endpoints (required in IPv6-only subnets)
+    userData.addCommands(
+      'mkdir -p /etc/amazon/ssm',
+      `printf '{"Agent":{"Region":"${this.region}","UseDualStackEndpoint":true}}\\n' > /etc/amazon/ssm/amazon-ssm-agent.json`,
+      'systemctl restart amazon-ssm-agent || true',
+    );
+
+    // 3. AWS CLI must use dual-stack endpoints (IPv6-only subnet)
+    userData.addCommands(
+      'export AWS_USE_DUALSTACK_ENDPOINT=true',
+    );
+
+    // 4. Attach EBS volume, format if needed, mount — terminate instance on failure
+    userData.addCommands(
+      'TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")',
+      'INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)',
+      `VOLUME_ID="${ebsVolume.volumeId}"`,
+      `REGION="${this.region}"`,
+      '',
+      '# Retry attach — volume may still be attached to a terminating instance',
+      'EBS_ATTACHED=false',
+      'for ATTEMPT in $(seq 1 30); do',
+      '  STATE=$(aws ec2 describe-volumes --volume-ids "$VOLUME_ID" --region "$REGION" --query "Volumes[0].State" --output text)',
+      '  if [ "$STATE" = "available" ]; then',
+      '    if aws ec2 attach-volume --volume-id "$VOLUME_ID" --instance-id "$INSTANCE_ID" --device /dev/xvdf --region "$REGION"; then',
+      '      EBS_ATTACHED=true',
+      '      break',
+      '    fi',
+      '  fi',
+      '  echo "EBS volume state: $STATE — waiting (attempt $ATTEMPT/30)..."',
+      '  sleep 10',
+      'done',
+      '',
+      'if [ "$EBS_ATTACHED" != "true" ]; then',
+      '  echo "FATAL: Failed to attach EBS volume after 5 minutes. Terminating instance."',
+      '  aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION"',
+      '  exit 1',
+      'fi',
+      '',
+      '# Wait for the block device to appear (may show as NVMe on Nitro instances)',
+      'BLOCK_DEV=""',
+      'for i in $(seq 1 30); do',
+      '  if [ -b /dev/xvdf ]; then BLOCK_DEV=/dev/xvdf; break; fi',
+      '  NVME_DEV=$(lsblk -o NAME,SERIAL -dpn 2>/dev/null | grep "${VOLUME_ID//-/}" | awk \'{print $1}\')',
+      '  if [ -n "$NVME_DEV" ] && [ -b "$NVME_DEV" ]; then BLOCK_DEV="$NVME_DEV"; break; fi',
+      '  sleep 2',
+      'done',
+      '',
+      'if [ -z "$BLOCK_DEV" ]; then',
+      '  echo "FATAL: EBS block device never appeared. Terminating instance."',
+      '  aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION"',
+      '  exit 1',
+      'fi',
+      '',
+      '# Format only if no filesystem exists',
+      'blkid "$BLOCK_DEV" || mkfs.ext4 "$BLOCK_DEV"',
+      '',
+      'mkdir -p /mnt/data',
+      'if ! mount "$BLOCK_DEV" /mnt/data; then',
+      '  echo "FATAL: Failed to mount EBS volume. Terminating instance."',
+      '  aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION"',
+      '  exit 1',
+      'fi',
+      '',
+      '# SQLite directory owned by www-data (UID 33)',
+      'mkdir -p /mnt/data/sqlite',
+      'chown 33:33 /mnt/data/sqlite',
+    );
+
+    // 5. Update Route 53 AAAA record with this instance's IPv6
+    userData.addCommands(
+      'IPV6_ADDR=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/ipv6)',
+      '',
+      `printf '{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"${config.originRecordName}.${config.hostedZoneName}","Type":"AAAA","TTL":60,"ResourceRecords":[{"Value":"%s"}]}}]}' "$IPV6_ADDR" > /tmp/r53-change.json`,
+      `aws route53 change-resource-record-sets --hosted-zone-id "${config.hostedZoneId}" --region "${this.region}" --change-batch file:///tmp/r53-change.json`,
+    );
+
+    // ECS-optimized Amazon Linux 2023 ARM AMI
+    const machineImage = ecs.EcsOptimizedImage.amazonLinux2023(ecs.AmiHardwareType.ARM);
+
+    const asg = new autoscaling.AutoScalingGroup(this, 'Asg', {
+      vpc,
+      vpcSubnets: { subnets: [instanceSubnet] },
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO),
+      machineImage,
+      securityGroup: ecsSg,
+      minCapacity: 0,
+      maxCapacity: 1,
+      desiredCapacity: 1,
+      userData,
+      ssmSessionPermissions: true,
+    });
+
+    // IAM permissions for EC2 instance: EBS attach + Route 53 update
+    asg.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:AttachVolume', 'ec2:DescribeVolumes'],
+      resources: ['*'],
+    }));
+    asg.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['route53:ChangeResourceRecordSets'],
+      resources: [`arn:aws:route53:::hostedzone/${config.hostedZoneId}`],
+    }));
+
+    // Add EC2 capacity provider to cluster
+    const capacityProvider = new ecs.AsgCapacityProvider(this, 'AsgCapacityProvider', {
+      autoScalingGroup: asg,
+      enableManagedTerminationProtection: false,
+    });
+    cluster.addAsgCapacityProvider(capacityProvider);
+
+    // --- Task Definition (EC2, host network mode) ---
+    const taskDef = new ecs.Ec2TaskDefinition(this, 'TaskDef', {
+      networkMode: ecs.NetworkMode.HOST,
     });
 
     // EFS volume
@@ -85,6 +199,12 @@ export class ComputeStack extends cdk.Stack {
       },
     });
 
+    // EBS bind mount (host path → container)
+    taskDef.addVolume({
+      name: 'ebs-sqlite',
+      host: { sourcePath: '/mnt/data/sqlite' },
+    });
+
     // Grant task role access to EFS
     fileSystem.grant(taskDef.taskRole, 'elasticfilesystem:ClientMount', 'elasticfilesystem:ClientWrite');
 
@@ -92,15 +212,13 @@ export class ComputeStack extends cdk.Stack {
     const mediawikiContainer = taskDef.addContainer('mediawiki', {
       image: mediawikiImage,
       essential: true,
-      portMappings: [{ containerPort: 80 }],
+      portMappings: [{ containerPort: 80, hostPort: 80 }],
+      memoryReservationMiB: 512,
       environment: {
-        MW_DB_HOST: dbInstance.instanceEndpoint.hostname,
-        MW_DB_NAME: 'cavewiki',
         MW_SERVER: `https://${config.domainName}`,
         MW_SITENAME: 'CaveWiki',
       },
       secrets: {
-        MW_DB_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
         MW_SECRET_KEY: ecs.Secret.fromSsmParameter(ssmSecretKey),
         MW_UPGRADE_KEY: ecs.Secret.fromSsmParameter(ssmUpgradeKey),
         MW_ORIGIN_VERIFY: ecs.Secret.fromSsmParameter(ssmOriginVerify),
@@ -118,25 +236,30 @@ export class ComputeStack extends cdk.Stack {
       }),
     });
 
-    mediawikiContainer.addMountPoints({
-      sourceVolume: 'efs-images',
-      containerPath: '/var/www/html/images',
-      readOnly: false,
-    });
+    mediawikiContainer.addMountPoints(
+      {
+        sourceVolume: 'efs-images',
+        containerPath: '/var/www/html/images',
+        readOnly: false,
+      },
+      {
+        sourceVolume: 'ebs-sqlite',
+        containerPath: '/var/www/html/data',
+        readOnly: false,
+      },
+    );
 
     // --- Sidecar container (jobrunner) ---
     const jobrunnerContainer = taskDef.addContainer('jobrunner', {
       image: mediawikiImage,
       essential: false,
       command: ['/usr/local/bin/jobrunner.sh'],
+      memoryReservationMiB: 128,
       environment: {
-        MW_DB_HOST: dbInstance.instanceEndpoint.hostname,
-        MW_DB_NAME: 'cavewiki',
         MW_SERVER: `https://${config.domainName}`,
         MW_SITENAME: 'CaveWiki',
       },
       secrets: {
-        MW_DB_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
         MW_SECRET_KEY: ecs.Secret.fromSsmParameter(ssmSecretKey),
         MW_UPGRADE_KEY: ecs.Secret.fromSsmParameter(ssmUpgradeKey),
         MW_ORIGIN_VERIFY: ecs.Secret.fromSsmParameter(ssmOriginVerify),
@@ -147,82 +270,33 @@ export class ComputeStack extends cdk.Stack {
       }),
     });
 
-    jobrunnerContainer.addMountPoints({
-      sourceVolume: 'efs-images',
-      containerPath: '/var/www/html/images',
-      readOnly: false,
-    });
+    jobrunnerContainer.addMountPoints(
+      {
+        sourceVolume: 'efs-images',
+        containerPath: '/var/www/html/images',
+        readOnly: false,
+      },
+      {
+        sourceVolume: 'ebs-sqlite',
+        containerPath: '/var/www/html/data',
+        readOnly: false,
+      },
+    );
 
     // Grant ECR pull to the execution role (needed since we use fromRegistry
     // with the dual-stack URI instead of fromDockerImageAsset which auto-grants).
-    // Must be after addContainer() calls — the execution role is lazily created.
     imageAsset.repository.grantPull(taskDef.executionRole!);
 
-    // --- ECS Service ---
-    // IPv6-only subnets: no public IPv4 assigned, Fargate communicates over IPv6.
-    const service = new ecs.FargateService(this, 'Service', {
+    // --- ECS Service (EC2 capacity) ---
+    const service = new ecs.Ec2Service(this, 'Service', {
       cluster,
       taskDefinition: taskDef,
       desiredCount: 1,
-      minHealthyPercent: 50,
-      assignPublicIp: false,
-      vpcSubnets: { subnets: ipv6OnlySubnets },
-      securityGroups: [fargateSg],
-      enableExecuteCommand: true,
+      minHealthyPercent: 0,
+      maxHealthyPercent: 100,
     });
 
-    // --- Lambda DNS Updater ---
-    const dnsUpdater = new lambdaNode.NodejsFunction(this, 'DnsUpdater', {
-      entry: path.join(__dirname, '..', 'lambda', 'dns-updater', 'index.ts'),
-      handler: 'handler',
-      runtime: lambda.Runtime.NODEJS_20_X,
-      timeout: cdk.Duration.seconds(30),
-      environment: {
-        HOSTED_ZONE_ID: config.hostedZoneId,
-        ORIGIN_RECORD_NAME: config.originRecordName,
-        HOSTED_ZONE_NAME: config.hostedZoneName,
-      },
-    });
-
-    // IAM permissions for Lambda (least-privilege)
-    dnsUpdater.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['ecs:DescribeTasks', 'ecs:ListTasks'],
-        resources: ['*'],
-        conditions: {
-          ArnEquals: { 'ecs:cluster': cluster.clusterArn },
-        },
-      }),
-    );
-    dnsUpdater.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['ec2:DescribeNetworkInterfaces'],
-        resources: ['*'],
-      }),
-    );
-    dnsUpdater.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['route53:ChangeResourceRecordSets'],
-        resources: [`arn:aws:route53:::hostedzone/${config.hostedZoneId}`],
-      }),
-    );
-
-    // EventBridge rule: any ECS task state change in this cluster.
-    // The Lambda is idempotent — it lists running tasks, prefers the newest
-    // healthy one, and UPSERTs the AAAA record. Every event is just
-    // "re-evaluate and converge," so no need to filter by lastStatus.
-    const rule = new events.Rule(this, 'TaskRunningRule', {
-      eventPattern: {
-        source: ['aws.ecs'],
-        detailType: ['ECS Task State Change'],
-        detail: {
-          clusterArn: [cluster.clusterArn],
-        },
-      },
-    });
-    rule.addTarget(new targets.LambdaFunction(dnsUpdater));
-
-    // --- Resolve origin verify secret for CloudFront (SecureString not supported as dynamic ref) ---
+    // --- Resolve origin verify secret for CloudFront ---
     const originVerifyLookup = new cr.AwsCustomResource(this, 'OriginVerifyLookup', {
       onUpdate: {
         service: 'SSM',
@@ -290,54 +364,6 @@ export class ComputeStack extends cdk.Stack {
       recordName: config.domainName,
       target: route53.RecordTarget.fromAlias(new route53Targets.CloudFrontTarget(distribution)),
     });
-
-    // --- Debug EC2 instance in IPv6-only subnet (for network diagnostics) ---
-    // SSM Agent is configured via user data to use dual-stack endpoints so it
-    // can phone home from the IPv6-only subnet (default agent uses IPv4-only endpoints).
-    const debugSg = new ec2.SecurityGroup(this, 'DebugSg', {
-      vpc,
-      description: 'Debug instance - outbound only',
-      allowAllOutbound: true,
-      allowAllIpv6Outbound: true,
-    });
-
-    const debugInstance = new ec2.Instance(this, 'DebugInstance', {
-      vpc,
-      vpcSubnets: { subnets: ipv6OnlySubnets },
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
-      machineImage: ec2.MachineImage.latestAmazonLinux2023(),
-      securityGroup: debugSg,
-      ssmSessionPermissions: true,
-    });
-
-    // Configure SSM Agent to use dual-stack endpoints (required for IPv6-only subnets)
-    debugInstance.addUserData(
-      'mkdir -p /etc/amazon/ssm',
-      `printf \'{"Agent":{"Region":"${this.region}","UseDualStackEndpoint":true}}\\n\' > /etc/amazon/ssm/amazon-ssm-agent.json`,
-      'systemctl restart amazon-ssm-agent',
-    );
-
-    // Allow debug instance to reach DB and EFS (same as Fargate).
-    // Uses L1 CfnSecurityGroupIngress so the rules live in this stack's template,
-    // avoiding a cross-stack dependency cycle (Network → Compute).
-    new ec2.CfnSecurityGroupIngress(this, 'DebugToDb', {
-      groupId: dbSg.securityGroupId,
-      ipProtocol: 'tcp',
-      fromPort: 3306,
-      toPort: 3306,
-      sourceSecurityGroupId: debugSg.securityGroupId,
-      description: 'MySQL from debug instance',
-    });
-    new ec2.CfnSecurityGroupIngress(this, 'DebugToEfs', {
-      groupId: efsSg.securityGroupId,
-      ipProtocol: 'tcp',
-      fromPort: 2049,
-      toPort: 2049,
-      sourceSecurityGroupId: debugSg.securityGroupId,
-      description: 'NFS from debug instance',
-    });
-
-    new cdk.CfnOutput(this, 'DebugInstanceId', { value: debugInstance.instanceId });
 
     // Stack outputs
     new cdk.CfnOutput(this, 'ClusterArn', { value: cluster.clusterArn });

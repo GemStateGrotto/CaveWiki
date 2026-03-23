@@ -14,21 +14,19 @@ const network = new NetworkStack(app, 'CaveWikiNetwork');
 
 const storage = new StorageStack(app, 'CaveWikiStorage', {
   vpc: network.vpc,
-  fargateSg: network.fargateSg,
-  dbSg: network.dbSg,
+  ecsSg: network.ecsSg,
   efsSg: network.efsSg,
+  availabilityZone: network.ipv6OnlySubnets[0].availabilityZone,
 });
 
 new ComputeStack(app, 'CaveWikiCompute', {
   vpc: network.vpc,
   ipv6OnlySubnets: network.ipv6OnlySubnets,
-  fargateSg: network.fargateSg,
-  dbSg: network.dbSg,
+  ecsSg: network.ecsSg,
   efsSg: network.efsSg,
-  dbInstance: storage.dbInstance,
-  dbSecret: storage.dbSecret,
   fileSystem: storage.fileSystem,
   accessPoint: storage.accessPoint,
+  ebsVolume: storage.ebsVolume,
   config,
 });
 
