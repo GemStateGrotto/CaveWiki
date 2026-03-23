@@ -8,12 +8,12 @@ import { Construct } from 'constructs';
 export interface StorageStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
   fargateSg: ec2.ISecurityGroup;
-  auroraSg: ec2.ISecurityGroup;
+  dbSg: ec2.ISecurityGroup;
   efsSg: ec2.ISecurityGroup;
 }
 
 export class StorageStack extends cdk.Stack {
-  public readonly dbCluster: rds.IDatabaseCluster;
+  public readonly dbInstance: rds.IDatabaseInstance;
   public readonly dbSecret: secretsmanager.ISecret;
   public readonly fileSystem: efs.IFileSystem;
   public readonly accessPoint: efs.IAccessPoint;
@@ -21,22 +21,21 @@ export class StorageStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: StorageStackProps) {
     super(scope, id, props);
 
-    // --- Aurora Serverless v2 (MySQL 8.0) ---
-    const cluster = new rds.DatabaseCluster(this, 'AuroraCluster', {
-      engine: rds.DatabaseClusterEngine.auroraMysql({
-        version: rds.AuroraMysqlEngineVersion.VER_3_08_0,
+    // --- RDS MySQL 8.0 (db.t4g.micro) ---
+    const instance = new rds.DatabaseInstance(this, 'Database', {
+      engine: rds.DatabaseInstanceEngine.mysql({
+        version: rds.MysqlEngineVersion.VER_8_0,
       }),
-      serverlessV2MinCapacity: 0,
-      serverlessV2MaxCapacity: 1,
-      writer: rds.ClusterInstance.serverlessV2('Writer', {
-        publiclyAccessible: false,
-      }),
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO),
       vpc: props.vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-      securityGroups: [props.auroraSg],
+      securityGroups: [props.dbSg],
       credentials: rds.Credentials.fromGeneratedSecret('admin'),
-      defaultDatabaseName: 'cavewiki',
+      databaseName: 'cavewiki',
       networkType: rds.NetworkType.DUAL,
+      publiclyAccessible: false,
+      multiAz: false,
+      allocatedStorage: 20,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -62,20 +61,20 @@ export class StorageStack extends cdk.Stack {
       createAcl: { ownerUid: '33', ownerGid: '33', permissions: '755' },
     });
 
-    this.dbCluster = cluster;
-    this.dbSecret = cluster.secret!;
+    this.dbInstance = instance;
+    this.dbSecret = instance.secret!;
     this.fileSystem = fileSystem;
     this.accessPoint = accessPoint;
 
     // Stack outputs
-    new cdk.CfnOutput(this, 'AuroraClusterEndpoint', {
-      value: cluster.clusterEndpoint.hostname,
+    new cdk.CfnOutput(this, 'DbEndpoint', {
+      value: instance.instanceEndpoint.hostname,
     });
-    new cdk.CfnOutput(this, 'AuroraClusterPort', {
-      value: cluster.clusterEndpoint.port.toString(),
+    new cdk.CfnOutput(this, 'DbPort', {
+      value: instance.instanceEndpoint.port.toString(),
     });
     new cdk.CfnOutput(this, 'DbSecretArn', {
-      value: cluster.secret!.secretArn,
+      value: instance.secret!.secretArn,
     });
     new cdk.CfnOutput(this, 'EfsFileSystemId', {
       value: fileSystem.fileSystemId,

@@ -15,20 +15,6 @@ $wgDBname     = getenv( 'MW_DB_NAME' ) ?: 'cavewiki';
 $wgDBuser     = 'admin';
 $wgDBpassword = getenv( 'MW_DB_PASSWORD' );
 
-# Aurora Serverless v2 scale-to-zero compatibility (25-30s cold start resume)
-$wgDBservers = [
-    [
-        'host'           => $wgDBserver,
-        'dbname'         => $wgDBname,
-        'user'           => $wgDBuser,
-        'password'       => $wgDBpassword,
-        'type'           => $wgDBtype,
-        'flags'          => DBO_DEFAULT,
-        'load'           => 1,
-        'connectTimeout' => 60,
-    ],
-];
-
 ## Site configuration
 $wgServer     = getenv( 'MW_SERVER' );
 $wgSitename   = getenv( 'MW_SITENAME' ) ?: 'CaveWiki';

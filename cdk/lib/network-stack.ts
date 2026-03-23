@@ -7,7 +7,7 @@ export class NetworkStack extends cdk.Stack {
   public readonly vpc: ec2.IVpc;
   public readonly ipv6OnlySubnets: ec2.ISubnet[];
   public readonly fargateSg: ec2.ISecurityGroup;
-  public readonly auroraSg: ec2.ISecurityGroup;
+  public readonly dbSg: ec2.ISecurityGroup;
   public readonly efsSg: ec2.ISecurityGroup;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -82,12 +82,12 @@ export class NetworkStack extends cdk.Stack {
       'HTTP from IPv6 (CloudFront)',
     );
 
-    const auroraSg = new ec2.SecurityGroup(this, 'AuroraSg', {
+    const dbSg = new ec2.SecurityGroup(this, 'DbSg', {
       vpc,
-      description: 'Aurora - allows MySQL from Fargate only',
+      description: 'Database - allows MySQL from Fargate only',
       allowAllOutbound: false,
     });
-    auroraSg.addIngressRule(
+    dbSg.addIngressRule(
       fargateSg,
       ec2.Port.tcp(3306),
       'MySQL from Fargate',
@@ -107,13 +107,13 @@ export class NetworkStack extends cdk.Stack {
     this.vpc = vpc;
     this.ipv6OnlySubnets = ipv6OnlySubnets;
     this.fargateSg = fargateSg;
-    this.auroraSg = auroraSg;
+    this.dbSg = dbSg;
     this.efsSg = efsSg;
 
     // Stack outputs
     new cdk.CfnOutput(this, 'VpcId', { value: vpc.vpcId });
     new cdk.CfnOutput(this, 'FargateSgId', { value: fargateSg.securityGroupId });
-    new cdk.CfnOutput(this, 'AuroraSgId', { value: auroraSg.securityGroupId });
+    new cdk.CfnOutput(this, 'DbSgId', { value: dbSg.securityGroupId });
     new cdk.CfnOutput(this, 'EfsSgId', { value: efsSg.securityGroupId });
   }
 }

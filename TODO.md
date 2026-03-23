@@ -35,7 +35,7 @@ Checklist for building out the PoC infrastructure. Each phase depends on the pre
 - [x] Route table: `::/0` → Internet Gateway (IPv6 egress)
 - [x] Security Groups:
   - [x] **Fargate SG**: inbound TCP 80 from `::/0` (IPv6 — CloudFront connects over IPv6; custom origin header validates requests)
-  - [x] **Aurora SG**: inbound TCP 3306 from Fargate SG only
+  - [x] **DB SG**: inbound TCP 3306 from Fargate SG only
   - [x] **EFS SG**: inbound TCP 2049 from Fargate SG only
 - [x] Export VPC and all three security groups as stack outputs
 - [x] Add IPv6-only public subnets (one per AZ) for Fargate — no IPv4 CIDR, IPv6 only
@@ -46,9 +46,9 @@ Checklist for building out the PoC infrastructure. Each phase depends on the pre
 ### Phase 2 Success Criteria
 
 - [x] `npx cdk synth CaveWikiNetwork` produces valid CloudFormation with no errors
-- [x] Template contains exactly one VPC (with IPv6 CIDR), four public subnets (two dual-stack for Aurora/EFS, two IPv6-only for Fargate), three security groups
+- [x] Template contains exactly one VPC (with IPv6 CIDR), four public subnets (two dual-stack for RDS/EFS, two IPv6-only for Fargate), three security groups
 - [x] No NAT Gateway or NAT Instance resources appear in the synthesized template
-- [x] Security group ingress rules match spec: Fargate SG allows 80/tcp from `::/0`; Aurora SG allows 3306/tcp from Fargate SG; EFS SG allows 2049/tcp from Fargate SG
+- [x] Security group ingress rules match spec: Fargate SG allows 80/tcp from `::/0`; DB SG allows 3306/tcp from Fargate SG; EFS SG allows 2049/tcp from Fargate SG
 - [x] `npx cdk deploy CaveWikiNetwork` succeeds and resources are visible in AWS Console
 
 ---
@@ -57,12 +57,11 @@ Checklist for building out the PoC infrastructure. Each phase depends on the pre
 
 Depends on: NetworkStack
 
-### Aurora Serverless v2
+### RDS MySQL 8.0
 
-- [x] Engine: Aurora MySQL 8.0 compatible
-- [x] Single writer instance (no reader)
-- [x] Min capacity: 0 ACU (scale-to-zero / auto-pause enabled)
-- [x] Max capacity: 1 ACU
+- [x] Engine: MySQL 8.0
+- [x] Instance class: db.t4g.micro
+- [x] Single-AZ
 - [x] Placed in public subnets, NOT publicly accessible (SG-restricted to Fargate SG)
 - [x] Master credentials: CDK-generated, auto-stored in Secrets Manager (free for RDS-managed)
 - [x] Removal policy: RETAIN
@@ -78,18 +77,18 @@ Depends on: NetworkStack
 
 ### Exports
 
-- [x] Aurora cluster endpoint + port
+- [x] DB instance endpoint + port
 - [x] Secrets Manager secret ARN (for DB credentials)
 - [x] EFS file system ID + access point ID
 
 ### Phase 3 Success Criteria
 
 - [x] `npx cdk synth CaveWikiStorage` produces valid CloudFormation with no errors
-- [x] Template contains Aurora cluster with ServerlessV2ScalingConfiguration (min 0, max 1)
+- [x] Template contains RDS MySQL instance (db.t4g.micro)
 - [x] Template contains EFS file system with Encrypted=true and an access point with PosixUser UID/GID 33
-- [x] Aurora and EFS resources have DeletionPolicy=Retain in the synthesized template
+- [x] RDS and EFS resources have DeletionPolicy=Retain in the synthesized template
 - [x] `npx cdk deploy CaveWikiStorage` succeeds
-- [x] Aurora cluster visible in RDS console with status "Available" or "Paused" (auto-pause)
+- [x] RDS instance visible in RDS console with status "Available"
 - [x] Secrets Manager contains the auto-generated DB credentials secret
 - [x] EFS file system visible in EFS console with mount targets in both AZs
 
@@ -120,10 +119,8 @@ All configuration via `getenv()` — no hardcoded values.
   - `$wgDBserver = getenv('MW_DB_HOST')`
   - `$wgDBname = getenv('MW_DB_NAME') ?: 'cavewiki'`
   - `$wgDBpassword = getenv('MW_DB_PASSWORD')`
-  - `$wgDBuser = 'admin'` (Aurora default master user)
+- [x] `$wgDBuser = 'admin'` (RDS default master user)
   - `$wgDBtype = 'mysql'`
-- [x] Aurora scale-to-zero compatibility:
-  - `$wgDBservers` array with `'connectTimeout' => 60` (handles 25-30s cold start resume)
 - [x] Site config:
   - `$wgServer = getenv('MW_SERVER')` (full URL, e.g., `https://wiki.example.org`)
   - `$wgSitename = getenv('MW_SITENAME') ?: 'CaveWiki'`
@@ -180,12 +177,12 @@ Depends on: NetworkStack, StorageStack. Requires Phase 4 Docker image files to e
 - [x] Image: `DockerImageAsset` from `docker/mediawiki/` (auto builds + pushes to CDK-managed ECR)
 - [x] Port mapping: 80
 - [x] Environment variables:
-  - `MW_DB_HOST` — Aurora cluster endpoint
+  - `MW_DB_HOST` — RDS instance endpoint
   - `MW_DB_NAME` — database name (default: `cavewiki`)
   - `MW_SERVER` — full public URL, constructed from `domainName` CDK context (e.g., `https://{domainName}`)
   - `MW_SITENAME` — wiki name (default: `CaveWiki`)
 - [x] Secrets (injected from Secrets Manager / SSM):
-  - `MW_DB_PASSWORD` — from Aurora Secrets Manager secret (password field)
+  - `MW_DB_PASSWORD` — from RDS Secrets Manager secret (password field)
   - `MW_SECRET_KEY` — from SSM `/cavewiki/mediawiki-secret-key`
   - `MW_UPGRADE_KEY` — from SSM `/cavewiki/mediawiki-upgrade-key`
   - `MW_ORIGIN_VERIFY` — from SSM `/cavewiki/origin-verify-secret`
@@ -328,19 +325,6 @@ Environment variables are already available in the shell (sourced automatically 
 - [x] CloudFront distribution status is "Deployed"
 - [x] `curl -I https://{domainName}` returns a response via CloudFront (check `X-Cache` or `Server` header)
 
-### Aurora Scale-to-Zero Validation
-
-Validates that Aurora's auto-pause/resume behavior is compatible with the 60-second `connectTimeout` configured in `LocalSettings.php`.
-
-**Process:**
-
-1. Confirm Aurora cluster is auto-paused: `aws rds describe-db-clusters --query 'DBClusters[?contains(DBClusterIdentifier, ``cavewiki``)].Status' --output text` should return `stopped` or show paused indicator
-2. Trigger a cold-start connection by browsing to `https://{domainName}` (or via `curl`). The first request after Aurora pauses will wait for resume.
-3. If the connection does not succeed within 60 seconds, the wiki will show a timeout error on first request after Aurora pauses
-
-- [ ] Aurora resumes and completes the connection within 60 seconds
-- [ ] If resume exceeds 60s: increase `connectTimeout` in `LocalSettings.php` or disable auto-pause (set min ACU to 0.5 instead of 0)
-
 ### Initial MediaWiki Installation
 
 ECS Exec is not available in IPv6-only mode. Use `aws ecs run-task` with a command override to run setup commands in a one-off task (same task definition, same network config, custom command).
@@ -356,7 +340,7 @@ ECS Exec is not available in IPv6-only mode. Use `aws ecs run-task` with a comma
 - [ ] In an incognito/private window, `https://{domainName}` shows only a login form (anonymous read blocked)
 - [ ] Create a test page with Semantic MediaWiki annotations (e.g., `[[Has type::Page]]`) — page saves without errors
 - [ ] Upload a test file — upload succeeds, file is accessible after upload
-- [ ] Stop and restart the Fargate task (force new deployment) — after restart, the uploaded file and wiki content still exist (confirms EFS and Aurora persistence)
+- [ ] Stop and restart the Fargate task (force new deployment) — after restart, the uploaded file and wiki content still exist (confirms EFS and RDS persistence)
 - [ ] Check CloudWatch Logs: the `jobrunner` log stream shows job processing output (even if "no jobs" messages)
 
 ---
@@ -429,7 +413,7 @@ These are not part of the current build but are tracked for later iterations.
 ### Operational
 
 - [ ] Enable AWS Backup for EFS (~$0.05/GB/mo)
-- [ ] Set up CloudWatch alarms (Aurora connections, Fargate health, EFS throughput)
+- [ ] Set up CloudWatch alarms (RDS connections, Fargate health, EFS throughput)
 - [ ] Consider Fargate Spot for additional cost savings (~70% discount, with interruption risk)
 - [ ] Consider scheduled Fargate scaling (scale to 0 at night) if usage patterns allow
-- [ ] Increase Aurora max ACU if performance is insufficient during active use
+- [ ] Consider upgrading RDS instance class if performance is insufficient during active use

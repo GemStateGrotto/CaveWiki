@@ -1,6 +1,6 @@
 # CaveWiki
 
-A private wiki for cave survey and exploration data, built on [MediaWiki](https://www.mediawiki.org/) with [Semantic MediaWiki](https://www.semantic-mediawiki.org/). Deployed to AWS using CDK, designed for light usage at minimal cost (~$35–40/mo).
+A private wiki for cave survey and exploration data, built on [MediaWiki](https://www.mediawiki.org/) with [Semantic MediaWiki](https://www.semantic-mediawiki.org/). Deployed to AWS using CDK, designed for light usage at minimal cost (~$44–46/mo).
 
 All access is private — only authenticated users can read or edit. The repository is reusable: every environment-specific value (domain, certificate, hosted zone) is injected at deploy time, never hardcoded.
 
@@ -13,12 +13,11 @@ User → CloudFront (HTTPS) → Fargate (HTTP, port 80)
                                           │
                                ┌──────────┼──────────┐
                                │          │          │
-                          Aurora v2     EFS      Route 53
-                         (MySQL 8.0)  (media)  (origin DNS)
-                        scale-to-zero
+                            RDS MySQL   EFS      Route 53
+                           (db.t4g.micro) (media)  (origin DNS)
 ```
 
-CloudFront handles HTTPS termination (no ALB needed). A Lambda watches ECS task state changes to keep a Route 53 AAAA record pointed at the Fargate task's IPv6 address, giving CloudFront a stable origin domain. A custom origin header ensures only the CloudFront distribution can reach the origin. Aurora auto-pauses when idle to cut database costs to near-zero.
+CloudFront handles HTTPS termination (no ALB needed). A Lambda watches ECS task state changes to keep a Route 53 AAAA record pointed at the Fargate task's IPv6 address, giving CloudFront a stable origin domain. A custom origin header ensures only the CloudFront distribution can reach the origin.
 
 Infrastructure is split into three CDK stacks — **Network**, **Storage**, and **Compute** — so you can tear down and rebuild compute without losing data.
 

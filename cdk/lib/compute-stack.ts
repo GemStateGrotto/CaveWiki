@@ -26,9 +26,9 @@ export interface ComputeStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
   ipv6OnlySubnets: ec2.ISubnet[];
   fargateSg: ec2.ISecurityGroup;
-  auroraSg: ec2.ISecurityGroup;
+  dbSg: ec2.ISecurityGroup;
   efsSg: ec2.ISecurityGroup;
-  dbCluster: rds.IDatabaseCluster;
+  dbInstance: rds.IDatabaseInstance;
   dbSecret: secretsmanager.ISecret;
   fileSystem: efs.IFileSystem;
   accessPoint: efs.IAccessPoint;
@@ -39,7 +39,7 @@ export class ComputeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
 
-    const { vpc, ipv6OnlySubnets, fargateSg, auroraSg, efsSg, dbCluster, dbSecret, fileSystem, accessPoint, config } = props;
+    const { vpc, ipv6OnlySubnets, fargateSg, dbSg, efsSg, dbInstance, dbSecret, fileSystem, accessPoint, config } = props;
 
     // --- SSM Parameters (read existing) ---
     const ssmSecretKey = ssm.StringParameter.fromSecureStringParameterAttributes(this, 'SsmSecretKey', {
@@ -94,7 +94,7 @@ export class ComputeStack extends cdk.Stack {
       essential: true,
       portMappings: [{ containerPort: 80 }],
       environment: {
-        MW_DB_HOST: dbCluster.clusterEndpoint.hostname,
+        MW_DB_HOST: dbInstance.instanceEndpoint.hostname,
         MW_DB_NAME: 'cavewiki',
         MW_SERVER: `https://${config.domainName}`,
         MW_SITENAME: 'CaveWiki',
@@ -130,7 +130,7 @@ export class ComputeStack extends cdk.Stack {
       essential: false,
       command: ['/usr/local/bin/jobrunner.sh'],
       environment: {
-        MW_DB_HOST: dbCluster.clusterEndpoint.hostname,
+        MW_DB_HOST: dbInstance.instanceEndpoint.hostname,
         MW_DB_NAME: 'cavewiki',
         MW_SERVER: `https://${config.domainName}`,
         MW_SITENAME: 'CaveWiki',
@@ -317,11 +317,11 @@ export class ComputeStack extends cdk.Stack {
       'systemctl restart amazon-ssm-agent',
     );
 
-    // Allow debug instance to reach Aurora and EFS (same as Fargate).
+    // Allow debug instance to reach DB and EFS (same as Fargate).
     // Uses L1 CfnSecurityGroupIngress so the rules live in this stack's template,
     // avoiding a cross-stack dependency cycle (Network → Compute).
-    new ec2.CfnSecurityGroupIngress(this, 'DebugToAurora', {
-      groupId: auroraSg.securityGroupId,
+    new ec2.CfnSecurityGroupIngress(this, 'DebugToDb', {
+      groupId: dbSg.securityGroupId,
       ipProtocol: 'tcp',
       fromPort: 3306,
       toPort: 3306,

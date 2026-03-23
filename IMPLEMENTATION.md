@@ -8,11 +8,11 @@ Infrastructure is split into three dependent CDK stacks so that persistent stora
 
 | Stack | Resources | Depends On |
 |---|---|---|
-| **CaveWikiNetwork** | VPC (2 AZs, public subnets only), Security Groups (Fargate, Aurora, EFS) | — |
-| **CaveWikiStorage** | Aurora Serverless v2 cluster, EFS file system + access point | Network |
+| **CaveWikiNetwork** | VPC (2 AZs, public subnets only), Security Groups (Fargate, DB, EFS) | — |
+| **CaveWikiStorage** | RDS MySQL 8.0 instance (db.t4g.micro), EFS file system + access point | Network |
 | **CaveWikiCompute** | ECS cluster + Fargate service, Docker image (ECR via DockerImageAsset), Lambda DNS updater, CloudFront distribution, Route 53 records | Network, Storage |
 
-Storage and Network stacks use `RemovalPolicy.RETAIN` on Aurora and EFS to protect data when the Compute stack is torn down.
+Storage and Network stacks use `RemovalPolicy.RETAIN` on the RDS instance and EFS to protect data when the Compute stack is torn down.
 
 ## Configuration
 
@@ -58,7 +58,7 @@ MediaWiki requires a `$wgSecretKey` and `$wgUpgradeKey`. These are stored as SSM
 
 Create these with `scripts/setup-secrets.sh` (generates random values, idempotent).
 
-Aurora database credentials are managed automatically by CDK — stored in Secrets Manager (free for RDS-managed secrets) and injected into the Fargate task.
+Database credentials are managed automatically by CDK — stored in Secrets Manager (free for RDS-managed secrets) and injected into the Fargate task.
 
 ## Architecture Decisions
 
@@ -72,7 +72,7 @@ Aurora database credentials are managed automatically by CDK — stored in Secre
 | Container registry | CDK `DockerImageAsset` → ECR | Automatic; CDK builds, tags, and pushes the image to a CDK-managed ECR repo |
 | Database secrets | CDK-managed Secrets Manager | Free for RDS-managed credentials; auto-generated, auto-rotatable |
 | MediaWiki secrets | SSM Parameter Store SecureString | Cheaper than Secrets Manager ($0 vs $0.40/secret/mo); created once via script |
-| VPC design | Dual-stack public subnets + IPv6-only public subnets, no NAT | Dual-stack subnets host Aurora/EFS (need IPv4); IPv6-only subnets host Fargate (no public IPv4, no IPv4 charge). No NAT Gateway ($32+/mo saved). |
+| VPC design | Dual-stack public subnets + IPv6-only public subnets, no NAT | Dual-stack subnets host RDS/EFS (need IPv4); IPv6-only subnets host Fargate (no public IPv4, no IPv4 charge). No NAT Gateway ($32+/mo saved). |
 | Fargate networking | IPv6-only, no public IPv4 | `assignPublicIp: false` in IPv6-only subnets. CloudFront connects over IPv6. Eliminates $3.60/mo public IPv4 charge. |
 | Fargate SG ingress | `::/0` on port 80 | CloudFront connects over IPv6; custom origin header (`X-Origin-Verify`) validates requests at Apache layer |
 | CloudFront origin | Lambda-updated Route 53 AAAA record | Fargate IPv6 addresses are assigned per-task; Lambda on ECS task state change event updates a Route 53 AAAA record (TTL 60s) for CloudFront |
@@ -80,7 +80,7 @@ Aurora database credentials are managed automatically by CDK — stored in Secre
 | CloudFront caching | Disabled (full passthrough) | MediaWiki serves dynamic, authenticated content; caching would break auth |
 | Background jobs | Sidecar container | Runs in the same Fargate task; simplest approach, no extra scheduling infrastructure |
 | Fargate sizing | 0.5 vCPU / 1 GB | Enough for light-use MediaWiki; cheapest non-trivial Fargate config (~$29/mo) |
-| Aurora capacity | 0–1 ACU, auto-pause | Scale-to-zero saves ~$40/mo when idle; 25-30s cold start acceptable; `LocalSettings.php` uses 60s connect timeout |
+| Database | RDS MySQL 8.0, db.t4g.micro | Simple, always-on; ~$12/mo |
 | Config model | CDK context (cdk.json + CLI) | Repo stays reusable; `scripts/deploy.sh` maps env vars to `--context` flags |
 
 ## Security Notes
@@ -90,7 +90,7 @@ Aurora database credentials are managed automatically by CDK — stored in Secre
 - **HTTPS enforced**: CloudFront redirects HTTP → HTTPS; viewer protocol is always TLS
 - **Origin traffic is HTTP**: CloudFront → Fargate is HTTP-only on port 80 (TLS terminates at CloudFront). Standard practice for CloudFront origins in the same AWS network.
 - **Origin restricted to CloudFront**: Apache validates a custom `X-Origin-Verify` header on every request. CloudFront injects this header with a shared secret (stored in SSM). Direct requests without the header receive 403.
-- **Database not publicly accessible**: Aurora is in public subnets but its security group only allows inbound from the Fargate security group on port 3306
+- **Database not publicly accessible**: RDS is in public subnets but its security group only allows inbound from the Fargate security group on port 3306
 - **EFS restricted**: Security group only allows inbound NFS (2049) from the Fargate security group
 - **ECS Exec not available**: ECS Exec is not supported in IPv6-only mode. Use `aws ecs run-task` with command overrides for initial setup and debugging.
 
@@ -147,11 +147,11 @@ Based on us-west-2 pricing for light usage (a few users, sporadic access):
 | Resource | Monthly Estimate |
 |---|---|
 | Fargate (0.5 vCPU / 1 GB, 24/7, IPv6-only — no public IPv4) | ~$29 |
-| Aurora Serverless v2 (mostly paused, occasional use) | ~$2–5 |
+| RDS MySQL (db.t4g.micro, single-AZ, 20 GB gp3) | ~$12 |
 | EFS (minimal storage, Elastic throughput) | ~$1 |
 | CloudFront (light traffic, no caching) | ~$1 |
 | Route 53 hosted zone | $0.50 |
 | ECR / Lambda / CloudWatch / misc | ~$0.50 |
-| **Total** | **~$34–38/mo** |
+| **Total** | **~$44–46/mo** |
 
 The main cost driver is Fargate at ~$29/mo (no public IPv4 charge). To stop paying for compute while preserving data: `cd cdk && npx cdk destroy CaveWikiCompute`.
